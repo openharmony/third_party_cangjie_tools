@@ -90,9 +90,9 @@ std::string GetSuperFuncCall(const Ptr<InheritableDecl>& owner, FuncDecl* funcDe
             if (keyMap.find(paramName)!= keyMap.end()) {
                 paramName = "`" + paramName + "`";
             }
-            bool skip = param == nullptr ||
-                (param->TestAttr(Cangjie::AST::Attribute::COMPILER_ADD) && paramName == "macroCallPtr");
-            if (skip) { continue; }
+            if (param == nullptr ||
+                (param->TestAttr(Cangjie::AST::Attribute::COMPILER_ADD) &&
+                 paramName == "macroCallPtr")) { continue; }
             if (paramName.empty()) {
                 continue;
             }

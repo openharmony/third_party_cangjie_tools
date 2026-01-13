@@ -181,7 +181,7 @@ void CompletionEnv::DealStructDecl(Ptr<Node> node, const Position pos)
         if (!structMember) {
             continue;
         }
-        if (structMember->astKind == ASTKind::MACRO_EXPAND_DECL &&
+        if (structMember->astKind == ASTKind::MACRO_EXPAND_DECL && 
             (structMember->identifier == "APILevel" || structMember->identifier == "Hide")) {
             continue;
         }
@@ -871,7 +871,8 @@ void CompletionEnv::InvokedAccessible(Ptr<Node> node,
                                       bool isImport)
 {
     if (node == nullptr || node->TestAnyAttr(Cangjie::AST::Attribute::CONSTRUCTOR,
-                                             Cangjie::AST::Attribute::MACRO_INVOKE_FUNC) || IsHiddenDecl(node)) {
+                                             Cangjie::AST::Attribute::MACRO_INVOKE_FUNC) ||
+                                            IsHiddenDecl(node)) {
         return;
     }
 

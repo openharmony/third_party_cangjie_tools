@@ -50,7 +50,8 @@ bool StructuralRuleGENU02::CheckTyEqualityHelper(Cangjie::AST::Ty* base, Cangjie
 bool StructuralRuleGENU02::IsEqual(Cangjie::AST::Ty* base, Cangjie::AST::Ty* derived)
 {
     if (!base->IsClassLike()) {
-        if (base->kind == derived->kind) {
+        if (base->kind == derived->kind || base->kind == TypeKind::TYPE_GENERICS ||
+            derived->kind == TypeKind::TYPE_GENERICS) {
             return true;
         } else {
             return false;
@@ -148,8 +149,15 @@ void StructuralRuleGENU02::FindExtendHelper(Ptr<Cangjie::AST::Node> node)
 void StructuralRuleGENU02::MatchPattern(ASTContext& ctx, Ptr<Node> node)
 {
     (void)ctx;
-    // Collect the inheritance relationships between classes/interfaces through extendDecl
-    FindExtendHelper(node);
-    // Check enum's constructor and top-level functions
-    FindEnumDeclHelper(node);
+    if (node->astKind ==  ASTKind::PACKAGE) {
+        auto pkg = static_cast<Package*>(node.get());
+        for (auto& file: pkg->files) {
+            enumCtrSet.clear();
+            inheritedClassMap.clear();
+            // Collect the inheritance relationships between classes/interfaces through extendDecl
+            FindExtendHelper(file);
+            // Check enum's constructor and top-level functions
+            FindEnumDeclHelper(file);
+        }
+    }
 }

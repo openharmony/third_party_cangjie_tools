@@ -63,6 +63,11 @@ void StructuralRuleGFUNC03::FuncDeclProcessor(Ptr<Node> node)
     auto functy = DynamicCast<AST::FuncTy*>(funcDecl->ty);
     if (functy) {
         auto paramTys = functy->paramTys;
+        for (auto modifier : funcDecl->modifiers) {
+            if (modifier.modifier== TokenKind::COMMON || modifier.modifier == TokenKind::PLATFORM) {
+                return;
+            }
+        }
         auto funcInfo = FuncInfo(funcDecl->identifier.GetRawText(), paramTys, blocks.top());
         localFuncInBlock[blocks.top()].insert(funcInfo);
         auto status = CheckFuncDecl(allFuncs, funcInfo);
@@ -94,6 +99,11 @@ void StructuralRuleGFUNC03::FileProcessor(Ptr<Node> node)
             continue;
         }
         auto paramTys = functy->paramTys;
+        for (auto modifier : funcDecl->modifiers) {
+            if (modifier.modifier== TokenKind::COMMON || modifier.modifier == TokenKind::PLATFORM) {
+                return;
+            }
+        }
         auto funcInfo = FuncInfo(funcDecl->identifier.GetRawText(), paramTys, nullptr);
         auto status = CheckFuncDecl(allFuncs, funcInfo);
         if (status == Status::SUB_CLASS) {

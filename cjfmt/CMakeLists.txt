@@ -13,7 +13,7 @@ if (MSVC AND ${CMAKE_VERSION} VERSION_GREATER "3.15")
     cmake_policy(SET CMP0091 NEW)
 endif ()
 
-set(CJFMT_VERSION_STR "1.1.0-alpha.66")
+set(CJFMT_VERSION_STR "1.1.0-alpha.68")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -88,6 +88,7 @@ endif ()
 
 add_compile_options(${CXX_SYSTEM_INCLUDE_CONFIGURATION_FLAG})
 add_compile_definitions(CJFMT_VERSION="${CJFMT_VERSION_STR}")
+add_compile_definitions(CANGJIE_CODEGEN_CJNATIVE_BACKEND)
 
 include_directories(${CANGJIE_HOME}/include)
 include_directories(${CMAKE_SOURCE_DIR}/include)

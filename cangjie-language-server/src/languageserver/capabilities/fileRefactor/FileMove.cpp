@@ -100,9 +100,6 @@ void FileMove::DealMoveFile(const ArkAST *ast, const std::string &file,
     const std::string &targetPkg, const std::string &targetPath, FileRefactor &refactor)
 {
     unsigned int fileId = ast->fileID;
-    if (fileId < 0) {
-        return;
-    }
     std::string fullPkgName = ast->file->curPackage->fullPackageName;
     auto index = ark::CompilerCangjieProject::GetInstance()->GetIndex();
     if (!index) {
@@ -163,9 +160,6 @@ void FileMove::DealRefFile(const ArkAST *ast, const std::string &file, const std
     FileRefactor &refactor)
 {
     unsigned int fileId = ast->fileID;
-    if (fileId < 0) {
-        return;
-    }
     std::string fullPkgName = ast->file->curPackage->fullPackageName;
     auto index = ark::CompilerCangjieProject::GetInstance()->GetIndex();
     if (!index) {
@@ -255,9 +249,6 @@ void FileMove::DealReExport(const ArkAST *ast, const std::string &file, const st
     FileRefactor &refactor)
 {
     unsigned int fileId = ast->fileID;
-    if (fileId < 0) {
-        return;
-    }
     std::string fullPkgName = ast->file->curPackage->fullPackageName;
     auto index = ark::CompilerCangjieProject::GetInstance()->GetIndex();
     if (!index || !ast->packageInstance) {
@@ -297,7 +288,7 @@ void FileMove::DealReExport(const ArkAST *ast, const std::string &file, const st
             refactor.MatchRefactor(FileRefactorKind::RefactorReExport, relation, modifier);
     };
 
-    auto DealSingleReExport = [&](std::vector<lsp::Symbol> &reExportSyms,
+    auto DealSingleReExport = [&index, &DealSingleReExportRef](std::vector<lsp::Symbol> &reExportSyms,
                                   lsp::Modifier modifier, std::string originPkg) {
         for (const auto &sym : reExportSyms) {
             std::string symName = FileMove::GetRealImportSymName(sym);
@@ -325,17 +316,11 @@ void FileMove::DealReExport(const ArkAST *ast, const std::string &file, const st
     };
 
     for (auto &fileImport : ast->file->imports) {
-        if (!fileImport || fileImport->end.IsZero() || !fileImport->modifier) {
+        if (FileMove::isInvalidImport(fileImport.get())) {
             continue;
         }
         auto importContent = fileImport.get()->content;
-        if (importContent.kind == ImportKind::IMPORT_MULTI) {
-            continue;
-        }
         lsp::Modifier modifier = FileRefactor::GetImportModifier(*fileImport);
-        if (!FileRefactor::ValidReExportModifier(modifier)) {
-            continue;
-        }
         std::string importFullPkg = FileRefactor::GetImportFullPkg(fileImport->content);
         const lsp::PkgSymsRequest pkgSymsRequest = {importFullPkg};
         std::vector<lsp::Symbol> reExportSyms;
@@ -551,6 +536,22 @@ std::string FileMove::GetTargetPath(std::string file)
     std::string relativePath = file.substr(FileUtil::GetDirPath(moveDirPath).length());
     std::string targetPath = FileUtil::JoinPath(targetDir, relativePath);
     return targetPath;
+}
+
+bool FileMove::isInvalidImport(Ptr<ImportSpec> fileImport)
+{
+    if (!fileImport || fileImport->end.IsZero() || !fileImport->modifier) {
+        return true;
+    }
+    auto importContent = fileImport.get()->content;
+    if (importContent.kind == ImportKind::IMPORT_MULTI) {
+        return true;
+    }
+    lsp::Modifier modifier = FileRefactor::GetImportModifier(*fileImport);
+    if (!FileRefactor::ValidReExportModifier(modifier)) {
+        return true;
+    }
+    return false;
 }
 
 File* FileMove::GetFileNode(const ArkAST *ast, std::string filePath)

@@ -685,7 +685,6 @@ struct FileRefactorChange {
     {
         return type == rhs.type && range == rhs.range && content == rhs.content;
     }
-
 };
 
 struct FileRefactorRespParams {

@@ -9,11 +9,13 @@
 #ifndef CANGJIE_FRONTEND_LSPCOMPILERINSTANCE_H
 #define CANGJIE_FRONTEND_LSPCOMPILERINSTANCE_H
 
+#include <string>
 #include <utility>
 
 #include "../json-rpc/StdioTransport.h"
 #include "CjoManager.h"
 #include "DependencyGraph.h"
+#include "cangjie/Basic/DiagnosticEngine.h"
 #include "cangjie/Frontend/CompilerInstance.h"
 #include "cangjie/Macro/MacroExpansion.h"
 #include "capabilities/diagnostic/LSPDiagObserver.h"
@@ -59,7 +61,7 @@ public:
     using CjoCacheMap = std::unordered_map<std::string, std::vector<uint8_t>>;
     LSPCompilerInstance(ark::Callbacks *cb,
                         CompilerInvocation &invocation,
-                        DiagnosticEngine &diag,
+                        std::unique_ptr<DiagnosticEngine> diag,
                         std::string realPkgName,
                         const std::unique_ptr<ark::ModuleManager> &moduleManger);
 
@@ -143,7 +145,9 @@ public:
         const std::unique_ptr<ark::CjoManager> &cjoManager, const std::unique_ptr<ark::DependencyGraph> &graph);
 
     bool CompileAfterParse(
-        const std::unique_ptr<ark::CjoManager> &cjoManager, const std::unique_ptr<ark::DependencyGraph> &graph);
+        const std::unique_ptr<ark::CjoManager> &cjoManager,
+        const std::unique_ptr<ark::DependencyGraph> &graph
+    );
 
     std::unordered_map<std::string, ark::EdgeType> UpdateUpstreamPkgs();
 
@@ -151,12 +155,20 @@ public:
 
     void UpdateDepGraph(const std::unique_ptr<ark::DependencyGraph> &graph, const std::string &prePkgName);
 
+    void SetBufferCache(const std::unordered_map<std::string, std::string> &buffer);
+
+    void SetBufferCacheForParse(const std::unordered_map<std::string, std::string> &buffer);
+
     ark::Callbacks *callback = nullptr;
-    std::string pkgNameForPath; // Real Package Name
+    std::string pkgNameForPath; // Full Package Name
     std::string pkgNameForCj;
     bool macroExpandSuccess = false;
-    std::set<std::string> upstreamPkgs;
+    std::set<std::string> upstreamPkgs; // direct upstream packages
+    std::mutex fileStatusLock;
+    std::unordered_map<std::string, SrcCodeChangeState> fileStatus;
     const std::unique_ptr<ark::ModuleManager> &moduleManger;
+    std::unique_ptr<DiagnosticEngine> diagOwned;
+    std::string upstreamSourceSetName;
 
     static inline std::shared_mutex mtx;
     static inline PackageMap dependentPackageMap;

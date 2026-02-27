@@ -6,10 +6,8 @@
 
 // The Cangjie API is in Beta. For details on its capabilities and limitations, please refer to the README file.
 
-package my_module
+package IncCompletion
 
-public import ohos.business_exception.BusinessException
-public import ohos.callback_invoke.allbackObject
-public import kit.PerformanceAnalysisKit.Hilog
+func qoo() {
 
-protected type AsyncCallback<T> = (?BusinessException, ?T) -> Unit
+}

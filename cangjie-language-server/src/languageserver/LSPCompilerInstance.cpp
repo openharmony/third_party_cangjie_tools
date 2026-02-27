@@ -41,21 +41,22 @@ std::tuple<std::string, std::string> GetFullPackageNames(const ImportSpec& impor
     if (import.content.prefixPaths.empty()) {
         return std::tuple(import.content.identifier, "");
     }
-    std::string fullPackageName = import.content.GetPrefixPath();
+    std::string packageName = import.content.GetPrefixPath();
     if (import.content.kind == ImportKind::IMPORT_ALL) {
-        return std::tuple(fullPackageName, "");
+        return std::tuple(packageName, "");
     }
-    [[maybe_unused]] std::string maybePackageName = fullPackageName + "." + import.content.identifier;
-    return std::tuple(maybePackageName, fullPackageName);
+    [[maybe_unused]] std::string maybePackageName = packageName + "." + import.content.identifier;
+    return std::tuple(maybePackageName, packageName);
 }
 }
 
 LSPCompilerInstance::LSPCompilerInstance(ark::Callbacks *cb, CompilerInvocation &invocation,
-                                         DiagnosticEngine &diag, std::string realPkgName,
+                                         std::unique_ptr<DiagnosticEngine> diag, std::string realPkgName,
                                          const std::unique_ptr<ark::ModuleManager> &moduleManger)
-    : CompilerInstance(invocation, diag), callback(cb), pkgNameForPath(std::move(realPkgName)),
+    : CompilerInstance(invocation, *diag), callback(cb), pkgNameForPath(std::move(realPkgName)),
       moduleManger(moduleManger)
 {
+    this->diagOwned = std::move(diag);
     (void)ExecuteCompilerApi("SetSourceCodeImportStatus", &ImportManager::SetSourceCodeImportStatus,
                              &importManager, false);
 }
@@ -70,7 +71,8 @@ std::unordered_map<std::string, ark::EdgeType> LSPCompilerInstance::UpdateUpstre
     std::string curModule;
     std::unordered_set<std::string> depends;
     if (!pkgNameForPath.empty()) {
-        curModule = SplitQualifiedName(pkgNameForPath).front();
+        curModule =
+            SplitQualifiedName(ark::CompilerCangjieProject::GetInstance()->GetRealPackageName(pkgNameForPath)).front();
         depends = ark::CompilerCangjieProject::GetInstance()->GetOneModuleDeps(curModule);
     }
 
@@ -95,23 +97,47 @@ std::unordered_map<std::string, ark::EdgeType> LSPCompilerInstance::UpdateUpstre
             if (package.empty() && orPackage.empty()) {
                 continue;
             }
-            std::string realDep = (package.size() > orPackage.size()) ? package : orPackage;
-            if (pkgNameForPath.empty() || realDep.empty()) {
-                if (depPkgsEdges.find(realDep) == depPkgsEdges.end() || depPkgsEdges[realDep] < edgeKindMap[modifier]) {
-                    depPkgsEdges[realDep] = edgeKindMap[modifier];
+            std::string dep = (package.size() > orPackage.size()) ? package : orPackage;
+            std::vector<std::string> realDeps;
+            if (ark::CompilerCangjieProject::GetInstance()->IsCommonSpecificPkg(dep)) {
+                std::vector<std::string> sourceSetGraph =
+                    ark::CompilerCangjieProject::GetInstance()->GetCommonSpecificSourceSetGraph(dep);
+                for (const auto &sourceSet : sourceSetGraph) {
+                    if (sourceSet.empty()) {
+                        continue;
+                    }
+                    std::string realDep = sourceSet + "-" + dep;
+                    realDeps.push_back(realDep);
                 }
-                depPkgs.insert(realDep);
-                continue;
             }
-            auto realModule = SplitQualifiedName(realDep).front();
+            if (realDeps.empty()) {
+                realDeps.push_back(dep);
+            }
+            auto realModule = SplitQualifiedName(dep).front();
             if (curModule != realModule && depends.count(realModule) == 0) {
                 continue;
             }
-            if (depPkgsEdges.find(realDep) == depPkgsEdges.end() || depPkgsEdges[realDep] < edgeKindMap[modifier]) {
-                depPkgsEdges[realDep] = edgeKindMap[modifier];
+            for (const auto &realDep : realDeps) {
+                if (pkgNameForPath.empty() || realDep.empty()) {
+                    if (depPkgsEdges.find(realDep) == depPkgsEdges.end()
+                        || depPkgsEdges[realDep] < edgeKindMap[modifier]) {
+                        depPkgsEdges[realDep] = edgeKindMap[modifier];
+                    }
+                    depPkgs.insert(realDep);
+                    continue;
+                }
+                if (depPkgsEdges.find(realDep) == depPkgsEdges.end()
+                    || depPkgsEdges[realDep] < edgeKindMap[modifier]) {
+                    depPkgsEdges[realDep] = edgeKindMap[modifier];
+                }
+                depPkgs.insert(realDep);
             }
-            depPkgs.insert(realDep);
         }
+    }
+    if (!upstreamSourceSetName.empty()) {
+        depPkgs.insert(
+            upstreamSourceSetName + "-" +
+            ark::CompilerCangjieProject::GetInstance()->GetRealPackageName(pkgNameForPath));
     }
     upstreamPkgs = depPkgs;
     return depPkgsEdges;
@@ -200,7 +226,7 @@ void LSPCompilerInstance::CompilePassForComplete(
     const auto filePath = GetSourceManager().GetSource(pos.fileID).path;
     auto file = GetFileByPath(filePath).get();
     // If the position is not in ImportSpec, do not need to ImportPackage.
-    if (file && !ark::InImportSpec(*file, pos) && name != "SignatureHelp") {
+    if (file && !ark::InImportSpec(*file, pos)) {
         return;
     }
     ImportCjoToManager(cjoManager, graph);
@@ -316,7 +342,8 @@ void LSPCompilerInstance::ImportCjoToManager(
         if (!cjoCache) {
             continue;
         }
-        importManager.SetPackageCjoCache(package, *cjoCache);
+        importManager.SetPackageCjoCache(
+            ark::CompilerCangjieProject::GetInstance()->GetRealPackageName(package), *cjoCache);
     }
 }
 
@@ -340,11 +367,13 @@ void LSPCompilerInstance::IndexCjoToManager(
  *
  * @param cjoManager Read cjo cache and update cjo cache and state
  * @param graph
+ * @param realPkgName Update target package cjo cache, used in common-specific package
  * @return true
  * @return false
  */
 bool LSPCompilerInstance::CompileAfterParse(
-    const std::unique_ptr<ark::CjoManager> &cjoManager, const std::unique_ptr<ark::DependencyGraph> &graph)
+    const std::unique_ptr<ark::CjoManager> &cjoManager,
+    const std::unique_ptr<ark::DependencyGraph> &graph)
 {
     ImportCjoToManager(cjoManager, graph);
     (void)ImportPackage();
@@ -370,6 +399,7 @@ bool LSPCompilerInstance::CompileAfterParse(
     cjoData.data = data;
     cjoData.status = ark::DataStatus::FRESH;
     cjoManager->SetData(pkgNameForPath, cjoData);
+    cjoManager->SetData(ark::CompilerCangjieProject::GetInstance()->GetRealPackageName(pkgNameForPath), cjoData);
     return changed;
 }
 
@@ -546,4 +576,57 @@ void LSPCompilerInstance::MarkBrokenDecls(Package &pkg)
 std::string LSPCompilerInstance::Denoising(std::string candidate)
 {
     return ark::CompilerCangjieProject::GetInstance()->Denoising(candidate);
+}
+
+void LSPCompilerInstance::SetBufferCache(const std::unordered_map<std::string, std::string> &buffer)
+{
+    for (auto& it: buffer) {
+        this->bufferCache.insert_or_assign(it.first, it.second);
+    }
+}
+
+void LSPCompilerInstance::SetBufferCacheForParse(const std::unordered_map<std::string, std::string> &buffer)
+{
+    std::lock_guard lock(fileStatusLock);
+    // mark files which not in buffer as deleted
+    for (auto it = fileStatus.begin(); it != fileStatus.end();) {
+        if (buffer.find(it->first) == buffer.end()) {
+            if (this->bufferCache.find(it->first) != this->bufferCache.end()) {
+                this->bufferCache[it->first].state = SrcCodeChangeState::DELETED;
+            }
+            it = fileStatus.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto& it: buffer) {
+        if (fileStatus.find(it.first) == fileStatus.end()) {
+            fileStatus[it.first] = SrcCodeChangeState::ADDED;
+        }
+
+        switch (fileStatus[it.first]) {
+            case SrcCodeChangeState::DELETED: {
+                // in changeWatchedfiles, buffercache which may update later than fileStatus
+                this->bufferCache[it.first].state = SrcCodeChangeState::DELETED;
+                fileStatus.erase(it.first);
+            }
+            case SrcCodeChangeState::UNCHANGED: {
+                this->bufferCache[it.first].state = SrcCodeChangeState::UNCHANGED;
+            }
+            case SrcCodeChangeState::ADDED: {
+                if (this->bufferCache.find(it.first) != this->bufferCache.end()) {
+                    this->bufferCache[it.first] = SrcCodeCacheInfo({SrcCodeChangeState::CHANGED, it.second});
+                } else {
+                    this->bufferCache[it.first] = SrcCodeCacheInfo({fileStatus[it.first], it.second});
+                }
+                fileStatus[it.first] = SrcCodeChangeState::UNCHANGED;
+            }
+            case SrcCodeChangeState::CHANGED:
+            default: {
+                this->bufferCache[it.first] = SrcCodeCacheInfo({fileStatus[it.first], it.second});
+                fileStatus[it.first] = SrcCodeChangeState::UNCHANGED;
+            }
+        }
+    }
 }

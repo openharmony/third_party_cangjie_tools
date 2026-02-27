@@ -274,7 +274,7 @@ void CompletionEnv::DealEnumDecl(Ptr<Node> node, const Position pos)
     }
     for (auto &memberDecl : pEnumDecl->constructors) {
         CompleteNode(memberDecl.get(), false, false, false, pEnumDecl->identifier.Val());
-        if (memberDecl->GetBegin() <= pos && pos <= memberDecl->GetEnd()) {
+        if (IsInEnumConstructor(memberDecl, pos)) {
             items.clear();
             return;
         }
@@ -1082,7 +1082,8 @@ void CompletionEnv::CompleteNode(
         return;
     }
     // skip VArray type
-    if (node->ty->kind == TypeKind::TYPE_VARRAY) {
+    bool skipVAaary = node->ty->kind == TypeKind::TYPE_VARRAY && signature == "VArray<T>";
+    if (skipVAaary) {
         return;
     }
     completion.label = signature;
@@ -1306,7 +1307,7 @@ void CompletionEnv::CompleteInitFuncDecl(Ptr<Node> node, const std::string &alia
         if (isInvalid) { return; }
         auto targetDecl = decl->type->GetTarget();
         if (targetDecl->IsStructOrClassDecl()) {
-            CompleteInitFuncDecl(targetDecl, aliasName, true);
+            CompleteInitFuncDecl(targetDecl, aliasName.empty() ? decl->identifier : aliasName, true);
         }
     }
 }
@@ -1637,5 +1638,17 @@ void CompletionEnv::AddCompletionItem(
 void CompletionEnv::SetSyscap(const std::string &moduleName)
 {
     this->syscap.SetIntersectionSet(moduleName);
+}
+
+bool CompletionEnv::IsInEnumConstructor(OwnedPtr<Decl> &decl, Position pos)
+{
+    if (decl->GetBegin() > pos || decl->GetEnd() <= pos) {
+        return false;
+    }
+
+    if (auto cstor = DynamicCast<FuncDecl>(decl.get())) {
+        return !cstor->funcBody || cstor->funcBody->GetBegin() > pos || cstor->funcBody->GetEnd() <= pos;
+    }
+    return false;
 }
 }

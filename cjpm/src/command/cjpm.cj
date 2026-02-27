@@ -27,6 +27,8 @@ Available subcommands:
   test             Unittest a local package or module
   bench            Run benchmarks in a local package or module
   clean            Clean up the target directory
+  bundle           Make distributable tarball of current module
+  publish          Publish a module to central repository
   install          Install a cangjie binary
   uninstall        Uninstall a cangjie binary
 
@@ -66,7 +68,7 @@ public open class Handle {
 
 // CpmCommand represents the base command when called without any subcommands
 class CpmCommand <: Handle {
-    private let CJPM_VERSION: String = "Cangjie Project Manager: 1.1.0-alpha.70"
+    private let CJPM_VERSION: String = "Cangjie Project Manager: 1.1.0-beta.20"
 
     init(args: Array<String>) {
         this.arguments = args

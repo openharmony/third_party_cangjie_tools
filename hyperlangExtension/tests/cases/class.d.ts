@@ -6,6 +6,7 @@
 
 // The Cangjie API is in Beta. For details on its capabilities and limitations, please refer to the README file.
 
+import { LoggerAdapter } from './interface'
 
 export declare class TDDiagBuilder {
     static readonly PLATFORM_OA = 0;
@@ -13,7 +14,7 @@ export declare class TDDiagBuilder {
     appId: string;
     appKey: string;
     appVersion: string;
-    platform: number;
+    platform1: number;
     loggerAdapter: LoggerAdapter | null | undefined;
     logUploadListener?: LogUploadListener;
     initiativeUploadWhiteListTags?: Array<string>;

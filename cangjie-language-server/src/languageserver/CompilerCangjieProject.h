@@ -15,6 +15,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "ArkAST.h"
 #include "CjoManager.h"
@@ -23,6 +24,7 @@
 #include "Options.h"
 #include "ThrdPool.h"
 #include "cangjie/AST/Node.h"
+#include "cangjie/Basic/DiagnosticEngine.h"
 #include "cangjie/Frontend/CompilerInvocation.h"
 #include "cangjie/Modules/ImportManager.h"
 #include "capabilities/completion/SortModel.h"
@@ -52,23 +54,29 @@ struct SCCParam {
              const std::unordered_map<std::string, bool> &inSt) : dfn(dfn), low(low), inSt(inSt) {};
 };
 
+enum class PkgType {
+    NORMAL,
+    COMMON,
+    SPECIFIC
+};
 struct PkgInfo {
 public:
+    // in common-specific module, this mean common package path
     std::string packagePath{};
     std::string packageName{};
     std::string modulePath{};
     std::string moduleName{};
     bool isSourceDir = false;
     bool needReCompile = false;
+    std::string sourceSetName{};
+    PkgType pkgType = PkgType::NORMAL;
 
     std::mutex pkgInfoMutex;
     std::unique_ptr<CompilerInvocation> compilerInvocation;
     std::unordered_map<std::string, std::string> bufferCache;
-    std::unique_ptr<DiagnosticEngine> diag;
-    std::unique_ptr<DiagnosticEngine> diagTrash;
 
     explicit PkgInfo(const std::string &pkgPath, const std::string &curModulePath,
-                        const std::string &curModuleName, Callbacks *callback);
+        const std::string &curModuleName, Callbacks *callback, PkgType pkgType = PkgType::NORMAL);
 
     ~PkgInfo() = default;
 };
@@ -86,7 +94,6 @@ public:
     std::mutex mtx;
     std::mutex indexMtx;
     std::recursive_mutex fileCacheMtx;
-    std::mutex fileMtx;
     std::atomic_bool isIdentical = true;
     static CompilerCangjieProject *GetInstance();
     static bool GetUseDB()
@@ -96,6 +103,10 @@ public:
     static void SetUseDB(const bool flag)
     {
         useDB = flag;
+    }
+    static void SetIncrementalOptimize(const bool flag)
+    {
+        incrementalOptimize = flag;
     }
     static void InitInstance(Callbacks *cb, lsp::IndexDatabase *arkIndexDB);
     void UpdateBuffCache(const std::string &file, bool isContentChange = false);
@@ -119,11 +130,14 @@ public:
         return nullptr;
     }
 
-    ArkAST *GetParseArkAST(const std::string &fileName)
+    ArkAST *GetParseArkAST(const std::string &taskName, const std::string &fileName)
     {
-        std::unique_lock<std::mutex> lock(fileMtx);
-        if (fileCacheForParse.find(fileName) != fileCacheForParse.end()) {
-            return fileCacheForParse[fileName].get();
+        if (taskName == "Completion" &&
+            fileCacheForComplete.find(fileName) != fileCacheForComplete.end()) {
+            return fileCacheForComplete[fileName].get();
+        } else if (taskName == "SignatureHelp" &&
+            fileCacheForSignatureHelp.find(fileName) != fileCacheForSignatureHelp.end()) {
+            return fileCacheForSignatureHelp[fileName].get();
         }
         return nullptr;
     }
@@ -145,11 +159,11 @@ public:
         return stdLibPath;
     }
 
-    std::string GetPathFromPkg(const std::string &pkgName)
+    std::string GetPathFromPkg(const std::string &fullPackageName)
     {
-        auto found = fullPkgNameToPath.find(pkgName);
-        if (found != fullPkgNameToPath.end()) {
-            return fullPkgNameToPath[pkgName];
+        auto found = pkgInfoMap.find(fullPackageName);
+        if (found != pkgInfoMap.end()) {
+            return pkgInfoMap[fullPackageName]->packagePath;
         }
         return {};
     }
@@ -163,7 +177,7 @@ public:
     {
         std::vector<std::string> ret;
         auto it = packageInstanceCache.find(pkgPath);
-        if (it == packageInstanceCache.end() || !it->second ||!it->second->package) {
+        if (it == packageInstanceCache.end() || !it->second || !it->second->package) {
             return ret;
         }
         for (auto &file: it->second->package->files) {
@@ -189,6 +203,11 @@ public:
 
     void InitPkgInfoAndParseInModule();
 
+    void ParseAndUpdateDepGraph(
+        std::unique_ptr<LSPCompilerInstance> &pkgCompiler,
+        PkgInfo &item,
+        const std::unordered_map<std::string, std::string> &bufferCache);
+
     void InitPkgInfoAndParseNotInModule();
 
     void InitPkgInfoAndParse();
@@ -200,7 +219,8 @@ public:
     bool Compiler(
         const std::string &moduleUri, const nlohmann::json &initializationOptions, const Environment &environment);
 
-    void CheckPackageNameByAbsName(const Cangjie::AST::File& needCheckedFile, const std::string &fullPackageName);
+    void CheckPackageNameByAbsName(const Cangjie::AST::File& needCheckedFile, const std::string &fullPackageName,
+        const std::unique_ptr<LSPCompilerInstance> &ci);
 
     std::string GetFullPkgName(const std::string &filePath) const;
 
@@ -208,7 +228,9 @@ public:
 
     Ptr<Package> GetSourcePackagesByPkg(const std::string &fullPkgName);
 
-    std::string GetModuleSrcPath(const std::string &modulePath);
+    std::string GetModuleSrcPath(const std::string &modulePath, const std::string &targetPath = "");
+
+    std::vector<std::string> GetCommonSpecificModuleSrcPaths(const std::string &modulePath);
 
     void SetHead(const std::string &fullPkgName) const
     {
@@ -259,9 +281,9 @@ public:
             SetHeadByFilePath(aheadPath);
         }
         if (!PkgHasSemaCache(fullPkgName) || !curDecl->curFile ||
-            fullPkgNameToPath.find(fullPkgName) == fullPkgNameToPath.end()) { return curDecl; }
+            pkgInfoMap.find(fullPkgName) == pkgInfoMap.end()) { return curDecl; }
         auto fileName = curDecl->curFile->fileName;
-        auto dirPath = fullPkgNameToPath[fullPkgName];
+        auto dirPath = GetPathFromPkg(fullPkgName);
         if (packageInstanceCache.find(dirPath) == packageInstanceCache.end() ||
             !packageInstanceCache[dirPath]->package) {
             return curDecl;
@@ -327,9 +349,11 @@ public:
         return {};
     };
 
-    void CompilerOneFile(
-        const std::string &file, const std::string &contents, Position pos = {0, 0, 0},
-        bool onlyParse = false, const std::string &name = "");
+    void CompilerOneFile(const std::string &file, const std::string &contents, Position pos = {0, 0, 0},
+        const std::string &name = "");
+
+    void ParseOneFile(const std::string &file, const std::string &contents, Position pos = {0, 0, 0},
+        const std::string &taskName = "");
 
     void IncrementForFileDelete(const std::string &fileName);
 
@@ -348,7 +372,7 @@ public:
 
     std::string GetPathBySource(const Node &node, unsigned int id);
 
-    void ClearParseCache();
+    void ClearParseCache(const std::string &actionName);
 
     Position getPackageNameErrPos(const File &file) const;
 
@@ -445,9 +469,9 @@ public:
         return modulesHome;
     }
 
-    std::unordered_map<std::string, std::string> GetFullPkgNameToPathMap()
+    std::unordered_set<std::string> GetPkgNameList()
     {
-        return fullPkgNameToPath;
+        return Utils::GetKeys(pkgInfoMap);
     }
 
     std::string GetContentByFile(const std::string& filePath)
@@ -482,8 +506,29 @@ public:
     std::unique_ptr<LSPCompilerInstance> GetCIForFileRefactor(const std::string &filePath);
 
     void StoreAllPackagesCache();
-    
+
     void EmitDiagsOfFile(const std::string &filePath);
+
+    void UpdateFileStatusInCI(const std::string& pkgName, const std::string& file,
+        CompilerInstance::SrcCodeChangeState state);
+
+    std::unique_ptr<DiagnosticEngine> GetDiagnosticEngine();
+
+    bool IsCommonSpecificPkg(const std::string &realPkgName);
+
+    std::vector<std::string> GetCommonSpecificSourceSetGraph(const std::string &pkgName);
+    
+    PkgType GetPkgType(const std::string &moduelPath, const std::string &path);
+
+    std::string GetSourceSetNameByPath(const std::string &path);
+
+    std::string GetCurSourceSetName(const std::string& fullPackageName);
+
+    std::string GetUpStreamSourceSetName(const std::string &fullPackageName);
+
+    std::string GetFinalDownStreamFullPkgName(const std::string &pkgName);
+
+    std::string GetRealPackageName(const std::string& fullPackageName);
 
 private:
     CompilerCangjieProject(Callbacks *cb, lsp::IndexDatabase *arkIndexDB);
@@ -491,7 +536,26 @@ private:
     bool InitCache(const std::unique_ptr<LSPCompilerInstance> &lspCI, const std::string &pkgForPath,
                    bool isInModule = true);
 
-    void InitParseCache(const std::unique_ptr<LSPCompilerInstance> &lspCI, const std::string &pkgForPath);
+    void InitParseCacheForComplete(const std::unique_ptr<LSPCompilerInstance> &lspCI, const std::string &pkgForPath);
+
+    void InitParseCacheForSignatureHelp(const std::unique_ptr<LSPCompilerInstance> &lspCI,
+        const std::string &pkgForPath);
+
+    struct NewPackageInfo {
+        std::string fullPkgName;
+        PkgType pkgType;
+        bool isDefaultPkg;
+    };
+
+    NewPackageInfo DeterminePkgNameAndType(const std::string &modulePath, const std::string &dirPath,
+        const std::string &absName);
+
+    void UpdateRelatedPackageStatus(const std::string &fullPkgName);
+
+    void InitPkgInfoBuffer(const std::string &fullPkgName, const std::string &absName, const std::string &contents,
+ 	                            bool isDefaultPkg);
+ 	 
+    void UpdatePkgMaps(const std::string &fullPkgName, const std::string &dirPath);
 
     void IncrementCompile(const std::string &filePath, const std::string &contents = "", bool isDelete = false);
 
@@ -500,6 +564,16 @@ private:
 
     void IncrementCompileForCompleteNotInSrc(const std::string &name,
         const std::string &filePath, const std::string &contents = "");
+
+    void IncrementCompileForSignatureHelp(const std::string &filePath, const std::string &contents = "");
+
+    void IncrementCompileForSignatureHelpNotInSrc(const std::string &filePath, const std::string &contents = "");
+
+    bool InitPackage(const std::string &packagePath, const std::string &fullPackageName,
+        const ModuleInfo &moduleInfo, PkgType pkgType);
+
+    void InitSubPackages(const std::string &sourcePath, const std::string &rootPackageName,
+        const ModuleInfo &moduleInfo, PkgType pkgType);
 
     void IncrementCompileForFileNotInSrc(const std::string &filePath, const std::string &contents = "",
                                          bool isDelete = false);
@@ -526,6 +600,16 @@ private:
 
     void ReleaseMemoryAsync();
 
+    bool SetCommonPartCjoForFullCompile(std::unique_ptr<Cangjie::LSPCompilerInstance> &ci,
+        const std::string &fullPkgName);
+
+    void SetCommonPartCjo(const std::unique_ptr<Cangjie::LSPCompilerInstance> &ci, const std::string &fullPkgName);
+
+    void HandleNewPackage(const std::string &absName, const std::string &contents, const std::string &dirPath,
+        const std::string &modulePath);
+
+    void ProcessInvalidPackage(const std::string &fullPkgName, const std::string &sourcePath);
+
     std::string modulesHome;
     std::string stdLibPath;
     std::string cangjiePath;
@@ -545,9 +629,11 @@ private:
     std::vector<std::string> passedWhenCfgPaths;
 
     std::unordered_map<std::string, std::unique_ptr<ArkAST>> fileCache;
-    std::unordered_map<std::string, std::unique_ptr<ArkAST>> fileCacheForParse;
+    std::unordered_map<std::string, std::unique_ptr<ArkAST>> fileCacheForComplete;
+    std::unordered_map<std::string, std::unique_ptr<ArkAST>> fileCacheForSignatureHelp;
     std::unordered_map<std::string, std::unique_ptr<PackageInstance>> packageInstanceCache;    // key: packagePath
-    std::unique_ptr<PackageInstance> packageInstanceCacheForParse;
+    std::unique_ptr<PackageInstance> packageInstanceCacheForComplete;
+    std::unique_ptr<PackageInstance> packageInstanceCacheForSignatureHelp;
 
     std::unique_ptr<ModuleManager> moduleManager;
     std::unique_ptr<ThrdPool> thrdPool;
@@ -558,17 +644,20 @@ private:
     std::unique_ptr<SortModel> model = std::make_unique<SortModel>();
 
     std::unique_ptr<lsp::BackgroundIndexDB> backgroundIndexDb;
-    std::unordered_map<std::string, std::string> fullPkgNameToPath;  // key: fullPkgName
     std::unordered_map<std::string, std::string> pathToFullPkgName;  // key: package path
+    std::unordered_map<std::string, std::unordered_set<std::string>> realPkgToFullPkgName;
     std::mutex cimapMtx;
+    // value used in full compilation, then key will be used in incremental compilation to search package was compiled
     std::unordered_map<std::string, std::unique_ptr<LSPCompilerInstance>> CIMap;
     std::unordered_map<std::string, std::unique_ptr<LSPCompilerInstance>> CIMapNotInSrc;
-    std::unique_ptr<LSPCompilerInstance> CIForParse;
+    std::unique_ptr<LSPCompilerInstance> CIForComplete;
+    std::unique_ptr<LSPCompilerInstance> CIForSignatureHelp;
     std::unordered_map<std::string, std::unique_ptr<PkgInfo>> pkgInfoMap;         // key: fullPackageName
     std::unordered_map<std::string, std::unique_ptr<PkgInfo>> pkgInfoMapNotInSrc; // key: dirPath for Cangjie file
     // key: fullPackageName, value: PackageSpec's modifier
     std::unordered_map<std::string, Modifier> pkgToModMap;
     static bool useDB;
+    static bool incrementalOptimize;
 };
 } // namespace ark
 

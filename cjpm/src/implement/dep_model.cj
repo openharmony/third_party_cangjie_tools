@@ -799,7 +799,7 @@ class DepModel {
         return p
     }
 
-    func scanPkgInfo(pkgSource: CJMPSource, isTest!: Bool = false, compileOptions!: String = ""): Result<RequiresPackages, Array<ScanDependencyError>> {
+    func scanPkgInfo(pkgSource: CJMPSource, timeStamp: Int64, isTest!: Bool = false, compileOptions!: String = ""): Result<RequiresPackages, Array<ScanDependencyError>> {
         if (pkgSource.allPaths.size > 1) {
             let paths = pkgSource.allPaths
             return paths.iterator().allResult { it =>
@@ -861,7 +861,6 @@ class DepModel {
         }
         let pkgPath = pkgSource.allPaths[0]
         let pkgPathString = pkgPath.toString()
-        let timeStamp = FileInfo(pkgPath).lastModificationTime.toUnixTimeStamp().toSeconds()
         if (!isTest && this.pkgBuildDepCacheMap.contains(pkgPathString) && (timeStamp == this.pkgBuildDepCacheMap[pkgPathString].timeStamp)) {
             return Ok(this.pkgBuildDepCacheMap[pkgPathString])
         } else if (isTest && this.pkgTestDepCacheMap.contains(pkgPathString) && (timeStamp == this.pkgTestDepCacheMap[pkgPathString].timeStamp)) {
@@ -1171,7 +1170,7 @@ class DepModel {
     func runPackageTask(pkgInfo: ResolveItem, fileNameHash: String, timeStamp: Int64,
         directDeps: HashSet<String>): BuildCheckResult {
 
-        let info = getPackageInfo(pkgInfo.packagePath, pkgInfo.compileOption, pkgInfo.customizedOption) ??
+        let info = getPackageInfo(pkgInfo.packagePath, pkgInfo.compileOption, pkgInfo.customizedOption, timeStamp) ??
             return FAILED_BUILD_CHECK_RESULT
 
         pkgInfo.fullName = info.packageName
@@ -1279,7 +1278,7 @@ class DepModel {
         return true
     }
 
-    func getPackageInfo(pkgSource: CJMPSource, cmdOption: String, customizedMap: HashMap<String, String>): ?RequiresPackages {
+    func getPackageInfo(pkgSource: CJMPSource, cmdOption: String, customizedMap: HashMap<String, String>, timeStamp: Int64): ?RequiresPackages {
         let errors = ArrayList<String>()
         for (path in pkgSource.allPaths) {
             if (!sourcePathCheck(path)) {
@@ -1306,7 +1305,7 @@ class DepModel {
             }
         }
 
-        scanPkgInfo(pkgSource, isTest: this.globalConfig.isTest, compileOptions: options)
+        scanPkgInfo(pkgSource, timeStamp, isTest: this.globalConfig.isTest, compileOptions: options)
             .inspectErr { errs => synchronized (this.errPrintMtx) {
                 for (e in errs) { eprintln(e) }
             } }.ok

@@ -57,6 +57,9 @@ public:
     void RunWithASTCache(
         const std::string &name, const std::string &file, Position pos, std::function<void(InputsAndAST)> action);
 
+    void DoCompletionWithASTCache(
+        const std::string &name, const std::string &file, Position pos, std::function<void(InputsAndAST)> action);
+
     void Stop() noexcept;
 
 private:
@@ -66,11 +69,12 @@ private:
 
     bool ShouldSkipHeadLocked() const;
 
-    void StartTask(std::string name, std::function<void()> task, NeedDiagnostics needDiag);
+    void StartTask(std::string name, std::function<void()> task, NeedDiagnostics needDiag, std::string filePath);
 
     struct Request {
         std::function<void()> action;
         std::string name;
+        std::string filePath;
         NeedDiagnostics updateType = NeedDiagnostics::AUTO;
     };
 

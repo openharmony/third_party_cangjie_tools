@@ -378,7 +378,6 @@ Ptr<Decl> DotCompleterByParse::FindTopDecl(const ArkAST &input, const std::strin
         if (!file) {
             continue;
         }
-        file->curPackage = context->curPackage;
         for (auto &decl : file->decls) {
             if (!decl) {
                 continue;
@@ -398,8 +397,9 @@ Ptr<Decl> DotCompleterByParse::FindTopDecl(const ArkAST &input, const std::strin
 
 void DotCompleterByParse::CompleteQualifiedType(const std::string &beforePrefix, CompletionEnv &env) const
 {
-    if (!packageNameForPath.empty() && !beforePrefix.empty()) {
-        auto basicStrings = Utils::SplitQualifiedName(packageNameForPath);
+    std::string realPkgName = CompilerCangjieProject::GetInstance()->GetRealPackageName(packageNameForPath);
+    if (!realPkgName.empty() && !beforePrefix.empty()) {
+        auto basicStrings = Utils::SplitQualifiedName(realPkgName);
         if (basicStrings.empty()) {
             return;
         }
@@ -422,9 +422,10 @@ void DotCompleterByParse::CompleteQualifiedType(const std::string &beforePrefix,
         if (!CompilerCangjieProject::GetInstance()->IsVisibleForPackage(packageNameForPath, item)) {
             continue;
         }
-        std::string pkgName = SplitFullPackage(item).second;
+        std::string realPkgItemName = CompilerCangjieProject::GetInstance()->GetRealPackageName(item);
+        std::string pkgName = SplitFullPackage(realPkgItemName).second;
         env.DotPkgName(pkgName, SplitFullPackage(beforePrefix).second);
-        env.DotPkgName(item, beforePrefix);
+        env.DotPkgName(realPkgItemName, beforePrefix);
     }
 }
 

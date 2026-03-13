@@ -36,7 +36,7 @@ public:
 
     void Preamble(const Package& package);
 
-    void Build(const Package& package);
+    void Build(const Package& package, const std::string &packagePath = "");
 
     const std::vector<Symbol>* GetSymbolMap() const
     {
@@ -236,6 +236,8 @@ private:
 
     static void CollectCompletionItem(const Decl &decl, Symbol &declSym);
 
+    void CollectNode(Ptr<Node> node, const std::string& filePath, AccessLevel pkgAccess);
+
     // Only toplevel and member decls (except extend decl).
     std::unordered_map<Ptr<const Decl>, SymbolID> declToSymIdMap;
 
@@ -294,7 +296,7 @@ private:
 
     const std::string JS_OBJECT_BASE_TY = "JSObjectBase";
 
-    const std::string JS_LAMBDA_TY = "(Class-JSContext, Struct-JSCallInfo) -> Struct-JSValue";
+    const std::string JS_LAMBDA_TY = "(Class-JSContext, Class-JSCallInfo) -> Class-JSValue";
 
     const std::string FUNC_REGISTER_TY = "(Class-JSContext) -> Class-JSFunction";
 

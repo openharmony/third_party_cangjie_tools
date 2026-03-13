@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { execSync } = require('child_process');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const RELEASE_TAG = 'v1.0.0';
 const BINARY_URLS = {
@@ -45,6 +46,10 @@ function fetchUrl(currentUrl, options = {}) {
         headers: {}
     };
 
+    const proxyUrl = process.env.HTTP_PROXY || process.env.HTTPS_PROXY 
+    if (proxyUrl) {
+        requestOptions.agent = new HttpsProxyAgent(proxyUrl);
+    }
 
     if (token) {
         requestOptions.headers.Authorization = `token ${token}`;

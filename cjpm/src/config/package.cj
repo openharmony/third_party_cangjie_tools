@@ -15,6 +15,7 @@ import cjpm.util.WithDefault
 
 const FILE_VERSION = "cjc-version"
 const PACKAGE_NAME = "name"
+const ORGANIZATION_NAME = "organization"
 const DESCRIPTION = "description"
 const VERSION = "version"
 const COMPILE_OPTION = "compile-option"
@@ -25,10 +26,13 @@ const SRC_DIR = "src-dir"
 const TARGET_DIR = "target-dir"
 const SCRIPT_DIR = "script-dir"
 const PACKAGE_CONFIGURATION = "package-configuration"
+const BUNDLE_INCLUDE = "include"
+const BUNDLE_EXCLUDE = "exclude"
 
 public class Package <: Serializable<Package> {
     public var cjcVersion: String = ""
     public var name: String = ""
+    public var organization = ""
     public var description: String = "nothing here"
     public var version: String = "1.0.0"
     public var outputType: OutputType = Unknown("")
@@ -42,8 +46,19 @@ public class Package <: Serializable<Package> {
     public var targetDir: String = ""
     public var scriptDir: String = ""
     public var srcDir: WithDefault<String> = WithDefault(DIR_SRC)
+    public var includeRules: Array<String> = Array<String>()
+    public var excludeRules: Array<String> = Array<String>()
     public var validPkgMap: Array<PackageInfo> = Array<PackageInfo>()
     public var actualSources: CJMPSource = CJMPSource.empty
+
+    // configuration for bundle
+    public var authors: Array<String> = Array<String>()
+    public var repositroy: String = ""
+    public var homepage: String = ""
+    public var documentation: String = ""
+    public var tag: Array<String> = Array<String>()
+    public var category: Array<String> = Array<String>()
+    public var license: Array<String> = Array<String>()
 
     public func serialize(): DataModel {
         return serializePackage(this)
@@ -58,6 +73,7 @@ func serializePackage(pkg: Package): DataModel {
     let dms = DataModelStruct()
         .add(field<String>(FILE_VERSION, pkg.cjcVersion))
         .add(field<String>(PACKAGE_NAME, pkg.name))
+        .add(field<String>(ORGANIZATION_NAME, pkg.organization))
         .add(field<String>(DESCRIPTION, pkg.description))
         .add(field<String>(VERSION, pkg.version))
         .add(field<String>(TARGET_DIR, pkg.targetDir))
@@ -82,6 +98,7 @@ func deserializePackage(dm: DataModel): Package {
     var result = Package()
     result.cjcVersion = String.deserialize((dms.get(FILE_VERSION) as DataModelString) ?? DataModelString(""))
     result.name = String.deserialize((dms.get(PACKAGE_NAME) as DataModelString) ?? DataModelString(""))
+    result.organization = String.deserialize((dms.get(ORGANIZATION_NAME) as DataModelString) ?? DataModelString(""))
     result.description = String.deserialize((dms.get(DESCRIPTION) as DataModelString) ?? DataModelString(""))
     result.version = String.deserialize((dms.get(VERSION) as DataModelString) ?? DataModelString(""))
     result.targetDir = String.deserialize((dms.get(TARGET_DIR) as DataModelString) ?? DataModelString(""))
@@ -96,6 +113,15 @@ func deserializePackage(dm: DataModel): Package {
     result.linkOption = String.deserialize((dms.get(LINK_OPTION) as DataModelString) ?? DataModelString(""))
     result.packageConfiguration = HashMap<String, PackageConfiguration>.deserialize(
         (dms.get(PACKAGE_CONFIGURATION) as DataModelStruct) ?? DataModelStruct())
+    result.includeRules = Array<String>.deserialize((dms.get(BUNDLE_INCLUDE) as DataModelSeq) ?? DataModelSeq())
+    result.excludeRules = Array<String>.deserialize((dms.get(BUNDLE_EXCLUDE) as DataModelSeq) ?? DataModelSeq())
+    result.authors = Array<String>.deserialize((dms.get(META_AUTHORS) as DataModelSeq) ?? DataModelSeq())
+    result.repositroy = String.deserialize((dms.get(META_REPOSITORY) as DataModelString) ?? DataModelString(""))
+    result.homepage = String.deserialize((dms.get(META_HOMEPAGE) as DataModelString) ?? DataModelString(""))
+    result.documentation = String.deserialize((dms.get(META_DOCUMENTATION) as DataModelString) ?? DataModelString(""))
+    result.tag = Array<String>.deserialize((dms.get(META_TAG) as DataModelSeq) ?? DataModelSeq())
+    result.category = Array<String>.deserialize((dms.get(META_CATEGORY) as DataModelSeq) ?? DataModelSeq())
+    result.license = Array<String>.deserialize((dms.get(META_LICENSE) as DataModelSeq) ?? DataModelSeq())
     return result
 }
 
@@ -135,9 +161,14 @@ public func verifyPackageField(cfg: TomlInfo, path: String): Bool {
             return false
         }
     }
-
+    let name = if (!cfg.pkg.organization.isEmpty()) {
+        cfg.pkg.name.removePrefix(cfg.pkg.organization + "::")
+    } else {
+        cfg.pkg.name
+    }
     let checkList: Array<((String, String) -> Bool, ?String)> = [
-        (nameCheck, cfg.pkg.name),
+        (nameCheck, name),
+        (organizationCheck, cfg.pkg.organization),
         (cjcVersionCheck, cfg.pkg.cjcVersion),
         (versionCheck, cfg.pkg.version),
         (safeCheck, cfg.pkg.compileOption),
@@ -147,7 +178,7 @@ public func verifyPackageField(cfg: TomlInfo, path: String): Bool {
         (safeCheck, cfg.pkg.scriptDir),
         (verifyLinkOption, cfg.pkg.linkOption)
     ]
-    if (!verifyAll(configFilePath, checkList)) {
+    if (!verifyAll("'package' field at ${configFilePath}", checkList)) {
         return false
     }
 

@@ -6,6 +6,6 @@
 
 // The Cangjie API is in Beta. For details on its capabilities and limitations, please refer to the README file.
 
-interface i extends e {}
+interface i {}
 
-export class c extends e {}
+export class c extends i {}

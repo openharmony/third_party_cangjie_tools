@@ -291,7 +291,7 @@ bool SymbolCollector::ShouldPassInCjdIndexing(Ptr<Node> node)
     return CjdIndexer::GetInstance() && CjdIndexer::GetInstance()->GetRunningState() && DynamicCast<FuncDecl *>(node);
 }
 
-void SymbolCollector::Build(const Package &package)
+void SymbolCollector::Build(const Package &package, const std::string &packagePath)
 {
     Preamble(package);
     std::unordered_set<Ptr<InheritableDecl>> inheritableDecls;
@@ -299,6 +299,10 @@ void SymbolCollector::Build(const Package &package)
     AccessLevel pkgAccess = package.accessible;
     for (auto &file : package.files) {
         auto filePath = file->curFile->filePath;
+        bool inValidPkg = !packagePath.empty() && !IsUnderPath(packagePath, filePath);
+        if (inValidPkg) {
+            continue;
+        }
         auto collectPre = [this, &inheritableDecls, &filePath, &pkgAccess](auto node) {
             if (auto invocation = node->GetConstInvocation()) {
                 CreateMacroRef(*node, *invocation);
@@ -326,17 +330,7 @@ void SymbolCollector::Build(const Package &package)
             if (IsHiddenDecl(node)) {
                 return VisitAction::SKIP_CHILDREN;
             }
-            if (auto decl = DynamicCast<Decl *>(node)) {
-                CreateBaseOrExtendSymbol(*decl, filePath, pkgAccess);
-                UpdateScope(*decl);
-            } else if (auto ref = DynamicCast<NameReferenceExpr *>(node)) {
-                CreateRef(*ref, filePath);
-            } else if (auto ce = DynamicCast<CallExpr *>(node); ce && !ce->desugarExpr) {
-                CreateNamedArgRef(*ce);
-            } else if (auto type = DynamicCast<Type *>(node)) {
-                CreateTypeRef(*type, filePath);
-            }
-            CollectCrossScopes(node);
+            CollectNode(node, filePath, pkgAccess);
             return VisitAction::WALK_CHILDREN;
         };
 
@@ -367,7 +361,8 @@ void SymbolCollector::Build(const Package &package)
                 return VisitAction::WALK_CHILDREN;
             }).Walk();
         }
-        if (!CjdIndexer::GetInstance() || !CjdIndexer::GetInstance()->GetRunningState()) {
+        bool shouldCreateImportRef = !CjdIndexer::GetInstance() || !CjdIndexer::GetInstance()->GetRunningState();
+        if (shouldCreateImportRef) {
            CreateImportRef(*file); 
         }
     }
@@ -1722,5 +1717,20 @@ void SymbolCollector::CollectCompletionItem(const Decl &decl, Symbol &declSym)
     if (!varSignature.empty() && !varInsert.empty()) {
         declSym.completionItems.push_back({varSignature, varInsert});
     }
+}
+
+void SymbolCollector::CollectNode(Ptr<Node> node, const std::string& filePath, AccessLevel pkgAccess)
+{
+    if (auto decl = DynamicCast<Decl *>(node)) {
+        CreateBaseOrExtendSymbol(*decl, filePath, pkgAccess);
+        UpdateScope(*decl);
+    } else if (auto ref = DynamicCast<NameReferenceExpr *>(node)) {
+        CreateRef(*ref, filePath);
+    } else if (auto ce = DynamicCast<CallExpr *>(node); ce && !ce->desugarExpr) {
+        CreateNamedArgRef(*ce);
+    } else if (auto type = DynamicCast<Type *>(node)) {
+        CreateTypeRef(*type, filePath);
+    }
+    CollectCrossScopes(node);
 }
 } // namespace ark::lsp

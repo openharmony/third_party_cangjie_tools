@@ -8,7 +8,9 @@
 
 type ErrorCode = number;
 
-enum EventType {}
+enum EventType {
+    DefaultEvent
+}
 
 enum ListenerStatusNumeric {
     on,

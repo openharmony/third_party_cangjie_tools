@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <sstream>
 #include <unordered_set>
@@ -202,20 +203,6 @@ static bool HasExprBoundary(const SelectionTree::SelectionTreeNode &treeNode, co
     return hasBoundary;
 }
 
-static const std::unordered_set<Cangjie::TokenKind> INTRODUCE_PARAMETER_COMPOUND_ASSIGN_OPERATORS = {
-    TokenKind::EXP_ASSIGN, TokenKind::MUL_ASSIGN, TokenKind::DIV_ASSIGN, TokenKind::ADD_ASSIGN,
-    TokenKind::SUB_ASSIGN, TokenKind::MOD_ASSIGN, TokenKind::LSHIFT_ASSIGN, TokenKind::RSHIFT_ASSIGN,
-    TokenKind::AND_ASSIGN, TokenKind::BITXOR_ASSIGN, TokenKind::BITAND_ASSIGN, TokenKind::BITOR_ASSIGN,
-    TokenKind::OR_ASSIGN
-};
-
-static bool IsSupportedCompoundAssignExpr(const Cangjie::AST::Node &node)
-{
-    auto assignExpr = DynamicCast<Cangjie::AST::AssignExpr *>(&node);
-    return assignExpr && assignExpr->isCompound &&
-        INTRODUCE_PARAMETER_COMPOUND_ASSIGN_OPERATORS.count(assignExpr->op) > 0;
-}
-
 static std::string GetCompoundAssignFallbackTypeName(const Cangjie::AST::Expr &expr)
 {
     auto assignExpr = DynamicCast<const Cangjie::AST::AssignExpr *>(&expr);
@@ -231,7 +218,7 @@ static bool HasValidIntroduceParameterExprType(const Cangjie::AST::Expr &expr)
     if (expr.GetTy() && GetString(*expr.GetTy()) != "UnknownType") {
         return true;
     }
-    return IsSupportedCompoundAssignExpr(expr) && !GetCompoundAssignFallbackTypeName(expr).empty();
+    return TweakUtils::IsSupportedCompoundAssignExpr(expr) && !GetCompoundAssignFallbackTypeName(expr).empty();
 }
 
 static Ptr<Cangjie::AST::Expr> GetContainingIntroduceParameterExpr(
@@ -251,7 +238,7 @@ static Ptr<Cangjie::AST::Expr> GetContainingIntroduceParameterExpr(
             return SelectionTree::WalkAction::WALK_CHILDREN;
         }
         bool isSupportedExpr = treeNode->node->astKind == ASTKind::BINARY_EXPR ||
-            IsSupportedCompoundAssignExpr(*treeNode->node);
+            TweakUtils::IsSupportedCompoundAssignExpr(*treeNode->node);
         if (isSupportedExpr && treeNode->node->end == selectedRange.end &&
             HasExprBoundary(*treeNode, selectedRange.start, true) &&
             HasExprBoundary(*treeNode, selectedRange.end, false)) {
@@ -292,7 +279,7 @@ static std::string GetIntroduceParameterExprTypeName(const SelectionTree &select
     const Range &selectedRange)
 {
     auto expr = GetIntroduceParameterExpr(selectionTree, selectedRange);
-    if (expr && IsSupportedCompoundAssignExpr(*expr)) {
+    if (expr && TweakUtils::IsSupportedCompoundAssignExpr(*expr)) {
         return GetCompoundAssignFallbackTypeName(*expr);
     }
     auto exactTypeName = TweakUtils::GetSelectedExprTypeName(selectionTree, selectedRange);
@@ -302,7 +289,7 @@ static std::string GetIntroduceParameterExprTypeName(const SelectionTree &select
     if (!expr || !expr->GetTy() || GetString(*expr->GetTy()) == "UnknownType") {
         return "";
     }
-    return GetString(*expr->GetTy());
+    return TweakUtils::GetTypeName(*expr->GetTy());
 }
 
 static std::string GetExplicitTypeName(const Tweak::Selection &sel)
@@ -336,10 +323,25 @@ class IntroduceParameterRule : public TweakRule {
                 std::to_string(static_cast<int>(IntroduceParameter::IntroduceParameterError::FAIL_GET_ROOT_EXPR))));
             return false;
         }
+        if (TweakUtils::IsTupleElementIndexSelection(sel.arkAst, sel.selectionTree, sel.range)) {
+            extraOptions.insert(std::make_pair(
+                "ErrorCode", std::to_string(static_cast<int>(TweakRule::TweakError::TWEAK_FAIL))));
+            return false;
+        }
         if (CANNOT_INTRODUCE_PARAMETER_EXPR.count(selectedExpr->astKind)) {
             extraOptions.insert(std::make_pair("ErrorCode",
                 std::to_string(
                     static_cast<int>(IntroduceParameter::IntroduceParameterError::INVALID_CODE_SEGMENT))));
+            return false;
+        }
+        if (TweakUtils::IsSelectionInConstInitializer(sel.arkAst, range)) {
+            extraOptions.insert(std::make_pair("ErrorCode", std::to_string(static_cast<int>(
+                IntroduceParameter::IntroduceParameterError::INVALID_CONST_INITIALIZER))));
+            return false;
+        }
+        if (TweakUtils::IsIfLetSelection(sel.selectionTree, range)) {
+            extraOptions.insert(std::make_pair("ErrorCode", std::to_string(static_cast<int>(
+                IntroduceParameter::IntroduceParameterError::INVALID_IF_LET_EXPRESSION))));
             return false;
         }
         auto funcDecl = IntroduceParameter::GetTargetFunc(sel);
@@ -348,7 +350,7 @@ class IntroduceParameterRule : public TweakRule {
                 std::to_string(static_cast<int>(IntroduceParameter::IntroduceParameterError::INVALID_SCOPE))));
             return false;
         }
-        if (IntroduceParameter::IsMemberAssignInInit(funcDecl, selectedExpr)) {
+        if (TweakUtils::IsMemberAssignInInit(funcDecl, selectedExpr)) {
             extraOptions.insert(std::make_pair("ErrorCode",
                 std::to_string(
                     static_cast<int>(IntroduceParameter::IntroduceParameterError::MEMBER_ASSIGN_IN_CONSTRUCTOR))));
@@ -441,23 +443,6 @@ Ptr<Cangjie::AST::FuncDecl> IntroduceParameter::GetTargetFunc(const Selection &s
         sel.selectionTree, sel.arkAst, GetIntroduceParameterExprRange(sel.selectionTree, sel.range));
 }
 
-bool IntroduceParameter::IsMemberAssignInInit(Ptr<FuncDecl> func, Ptr<Node> expr)
-{
-    if (!expr || !func || !func->TestAttr(Attribute::CONSTRUCTOR)) {
-        return false;
-    }
-
-    if (auto assign = DynamicCast<AssignExpr>(expr)) {
-        if (auto leftValue = DynamicCast<MemberAccess>(assign->leftValue.get())) {
-            if (auto refExpr = DynamicCast<RefExpr>(leftValue->baseExpr.get())) {
-                return refExpr->isThis;
-            }
-        }
-    }
-
-    return false;
-}
-
 TextEdit IntroduceParameter::InsertParameter(
     Cangjie::AST::FuncDecl &funcDecl, std::string &paramName, std::string &typeName)
 {
@@ -517,33 +502,8 @@ static bool IsFuncParamUsedOutsideRange(Cangjie::AST::FuncDecl &funcDecl, Cangji
     return isUsed;
 }
 // LCOV_EXCL_BR_STOP
-// LCOV_EXCL_START
-static bool GetParamRemovalRange(Cangjie::AST::FuncParamList &paramList, Cangjie::AST::FuncParam &param, Range &range)
-{
-    for (std::size_t index = 0; index < paramList.params.size(); ++index) {
-        if (!paramList.params[index] || paramList.params[index].get() != &param) {
-            continue;
-        }
-        if (paramList.params.size() == 1) {
-            range.start = param.begin;
-            range.end = param.end;
-            return true;
-        }
-        if (index + 1 < paramList.params.size() && paramList.params[index + 1]) {
-            range.start = param.begin;
-            range.end = paramList.params[index + 1]->begin;
-            return true;
-        }
-        if (index > 0 && paramList.params[index - 1]) {
-            range.start = paramList.params[index - 1]->end;
-            range.end = param.end;
-            return true;
-        }
-        return false;
-    }
-    return false;
-}
 
+// LCOV_EXCL_START
 static std::vector<std::size_t> CollectRemovableParamIndices(
     const Tweak::Selection &sel, Cangjie::AST::FuncDecl &funcDecl, Cangjie::AST::FuncParamList &paramList, Range &range)
 {
@@ -600,26 +560,91 @@ static std::vector<TextEdit> BuildPartialParameterRemovalEdits(
     std::size_t replacedIndex)
 {
     std::vector<TextEdit> edits;
-    for (auto it = removedParamIndices.rbegin(); it != removedParamIndices.rend(); ++it) {
-        if (*it == replacedIndex || *it >= paramList.params.size() || !paramList.params[*it]) {
+    std::vector<std::size_t> indices;
+    for (auto index : removedParamIndices) {
+        if (index == replacedIndex || index >= paramList.params.size() || !paramList.params[index]) {
             continue;
         }
+        indices.push_back(index);
+    }
+    if (indices.empty()) {
+        return edits;
+    }
+
+    std::sort(indices.begin(), indices.end(), std::greater<std::size_t>());
+    for (std::size_t i = 0; i < indices.size();) {
+        std::size_t segmentEnd = indices[i];
+        std::size_t segmentStart = segmentEnd;
+        while (i + 1 < indices.size() && indices[i + 1] + 1 == segmentStart) {
+            ++i;
+            segmentStart = indices[i];
+        }
+
         Range removeRange;
-        if (!GetParamRemovalRange(paramList, *paramList.params[*it], removeRange)) {
+        if (segmentEnd + 1 < paramList.params.size() && paramList.params[segmentEnd + 1]) {
+            removeRange = {paramList.params[segmentStart]->begin, paramList.params[segmentEnd + 1]->begin};
+        } else if (segmentStart > 0 && paramList.params[segmentStart - 1]) {
+            removeRange = {paramList.params[segmentStart - 1]->end, paramList.params[segmentEnd]->end};
+        } else if (paramList.params[segmentStart]) {
+            removeRange = {paramList.params[segmentStart]->begin, paramList.params[segmentEnd]->end};
+        } else {
+            ++i;
             continue;
         }
         TextEdit textEdit;
         textEdit.range = TransformFromChar2IDE(removeRange);
         edits.push_back(textEdit);
+        ++i;
     }
     return edits;
 }
 // LCOV_EXCL_STOP
+static std::optional<Position> ResolveParamListRightParen(
+    const Tweak::Selection *sel, Cangjie::AST::FuncDecl *funcDecl, Cangjie::AST::FuncParamList &paramList)
+{
+    if (!sel || !sel->arkAst || !sel->arkAst->sourceManager || paramList.params.empty() || !paramList.params.front()) {
+        return std::nullopt;
+    }
+    auto searchEnd = paramList.rightParenPos;
+    if (searchEnd.IsZero() || searchEnd <= paramList.params.front()->begin) {
+        searchEnd = paramList.params.back() ? paramList.params.back()->end : searchEnd;
+    }
+    if (funcDecl && funcDecl->funcBody && funcDecl->funcBody->body &&
+        funcDecl->funcBody->body->begin > paramList.params.front()->begin) {
+        searchEnd = funcDecl->funcBody->body->begin;
+    }
+    if (searchEnd.IsZero() || searchEnd <= paramList.params.front()->begin) {
+        return std::nullopt;
+    }
+
+    auto searchStart = paramList.params.front()->begin;
+    std::string text = sel->arkAst->sourceManager->GetContentBetween(searchStart, searchEnd);
+    int depth = 0;
+    for (size_t offset = 0; offset < text.size(); ++offset) {
+        if (text[offset] == '(') {
+            ++depth;
+            continue;
+        }
+        if (text[offset] != ')') {
+            continue;
+        }
+        if (depth == 0) {
+            return TweakUtils::PositionAtOffset(searchStart, text, offset);
+        }
+        --depth;
+    }
+    return std::nullopt;
+}
+
 static std::vector<TextEdit> BuildAllParameterReplacementEdit(
-    Cangjie::AST::FuncParamList &paramList, const std::string &newParamText)
+    Cangjie::AST::FuncParamList &paramList,
+    const std::string &newParamText,
+    const Tweak::Selection *sel = nullptr,
+    Cangjie::AST::FuncDecl *funcDecl = nullptr)
 {
     TextEdit textEdit;
-    Range replaceRange = {paramList.params.front()->begin, paramList.params.back()->end};
+    auto rightParen = ResolveParamListRightParen(sel, funcDecl, paramList);
+    Range replaceRange = {paramList.params.front()->begin, rightParen.value_or(paramList.params.back()->end)};
     textEdit.range = TransformFromChar2IDE(replaceRange);
     textEdit.newText = newParamText;
     return {textEdit};
@@ -643,9 +668,9 @@ static std::vector<TextEdit> RemoveReplacedParameters(const ParamRemovalContext 
     std::string newParamText = BuildNewParamText(context.funcDecl, context.paramName, context.typeName);
     if (context.removedParamIndices.size() == paramList->params.size()) {
         context.insertedParameter = true;
-        return BuildAllParameterReplacementEdit(*paramList, newParamText);
+        return BuildAllParameterReplacementEdit(*paramList, newParamText, &context.sel, &context.funcDecl);
     }
-
+// LCOV_EXCL_START
     std::size_t replacedIndex = context.removedParamIndices.front();
     if (replacedIndex >= paramList->params.size() || !paramList->params[replacedIndex]) {
         return edits;
@@ -691,7 +716,7 @@ static std::vector<TextEdit> BuildParameterListSyncEdits(
     edits.insert(edits.end(), removeEdits.begin(), removeEdits.end());
     return edits;
 }
-
+// LCOV_EXCL_STOP
 static void UpdateInheritedFunctionSignatures(
     const Tweak::Selection &sel,
     Cangjie::AST::FuncDecl &funcDecl,
@@ -705,6 +730,7 @@ static void UpdateInheritedFunctionSignatures(
     inheritedDecls.insert(localOverrides.begin(), localOverrides.end());
     for (auto &decl : inheritedDecls) {
         auto relatedFunc = DynamicCast<Cangjie::AST::FuncDecl *>(decl.get());
+        // LCOV_EXCL_START
         if (!relatedFunc || relatedFunc == &funcDecl || !relatedFunc->curFile) {
             continue;
         }
@@ -715,6 +741,7 @@ static void UpdateInheritedFunctionSignatures(
         std::string uri = URI::URIFromAbsolutePath(relatedFunc->curFile->filePath).ToString();
         auto &fileEdits = applyEdits[uri];
         fileEdits.insert(fileEdits.end(), edits.begin(), edits.end());
+        // LCOV_EXCL_STOP
     }
 }
 
@@ -749,11 +776,11 @@ static std::set<Ptr<Cangjie::AST::Decl>> CollectLocalOverrideDecls(
     return decls;
 }
 
-TextEdit IntroduceParameter::ReplaceExprWithParam(const Selection &sel, Range &range, std::string &paramName)
+TextEdit IntroduceParameter::ReplaceExprWithParam(const Selection &sel, Range range, std::string &paramName)
 {
     TextEdit textEdit;
     auto selectedExpr = GetIntroduceParameterExpr(sel.selectionTree, range);
-    bool isCompoundAssign = selectedExpr && IsSupportedCompoundAssignExpr(*selectedExpr);
+    bool isCompoundAssign = selectedExpr && TweakUtils::IsSupportedCompoundAssignExpr(*selectedExpr);
     textEdit.newText = isCompoundAssign ? "" : paramName;
     if (isCompoundAssign) {
         Range deleteLineRange = range;
@@ -767,11 +794,11 @@ TextEdit IntroduceParameter::ReplaceExprWithParam(const Selection &sel, Range &r
     std::string charContent = sel.arkAst->sourceManager->GetContentBetween(
         {range.start.fileID, range.start.line, 1}, range.start);
     range.start.column = CountUnicodeCharacters(charContent) + 1;
-    
+
     std::string endCharContent = sel.arkAst->sourceManager->GetContentBetween(
         {range.end.fileID, range.end.line, 1}, range.end);
     range.end.column = CountUnicodeCharacters(endCharContent) + 1;
-    
+
     textEdit.range = TransformFromChar2IDE(range);
     return textEdit;
 }
@@ -782,32 +809,62 @@ static void UpdateCallSites(const CallSiteContext &context, std::map<std::string
         return;
     }
 
-    for (auto &file : context.sel.arkAst->file->curPackage->files) {
-        if (!file) {
-            continue;
+    std::unordered_set<const Cangjie::AST::File *> visitedFiles;
+    auto updatePackage = [&context, &applyEdits, &visitedFiles](Ptr<const Cangjie::AST::Package> package) {
+        if (!package) {
+            return;
         }
-        std::vector<TextEdit> callSiteEdits;
-        Walker(file.get(), [&context, &callSiteEdits](auto node) {
-            if (!node || node->astKind != ASTKind::CALL_EXPR) {
+        for (auto &file : package->files) {
+            if (!file || !visitedFiles.insert(file.get()).second) {
+                continue;
+            }
+            std::vector<TextEdit> callSiteEdits;
+            Walker(file.get(), [&context, &callSiteEdits](auto node) {
+                if (!node || node->astKind != ASTKind::CALL_EXPR) {
+                    return VisitAction::WALK_CHILDREN;
+                }
+                auto callExpr = DynamicCast<Cangjie::AST::CallExpr *>(node.get());
+                auto resolvedFunction = callExpr ? callExpr->resolvedFunction.get() : nullptr;
+                if (!resolvedFunction || (resolvedFunction != &context.funcDecl &&
+                    !CheckDeclEqual(context.funcDecl, *resolvedFunction))) {
+                    return VisitAction::WALK_CHILDREN;
+                }
+                auto textEdit = InsertArgumentAtCallSite(context, *callExpr);
+                if (textEdit) {
+                    callSiteEdits.push_back(*textEdit);
+                }
                 return VisitAction::WALK_CHILDREN;
-            }
-            auto callExpr = DynamicCast<Cangjie::AST::CallExpr *>(node.get());
-            if (!callExpr || callExpr->resolvedFunction.get() != &context.funcDecl) {
-                return VisitAction::WALK_CHILDREN;
-            }
-            auto textEdit = InsertArgumentAtCallSite(context, *callExpr);
-            if (textEdit) {
-                callSiteEdits.push_back(*textEdit);
-            }
-            return VisitAction::WALK_CHILDREN;
-        }).Walk();
+            }).Walk();
 
-        if (callSiteEdits.empty()) {
-            continue;
+            if (callSiteEdits.empty()) {
+                continue;
+            }
+            std::string uri = URI::URIFromAbsolutePath(file->filePath).ToString();
+            auto &edits = applyEdits[uri];
+            edits.insert(edits.end(), callSiteEdits.begin(), callSiteEdits.end());
         }
-        std::string uri = URI::URIFromAbsolutePath(file->filePath).ToString();
-        auto &edits = applyEdits[uri];
-        edits.insert(edits.end(), callSiteEdits.begin(), callSiteEdits.end());
+    };
+
+    updatePackage(context.sel.arkAst->file->curPackage);
+
+    auto project = CompilerCangjieProject::GetInstance();
+    if (!project || context.funcDecl.fullPackageName.empty()) {
+        return;
+    }
+    auto dependentPackages = project->GetDependencyGraph()->FindAllDependents(context.funcDecl.fullPackageName);
+    // Loading an uncached package may evict another package from the small semantic-AST LRU.
+    std::vector<std::string> uncachedPackages;
+    for (const auto &packageName : dependentPackages) {
+        if (project->PkgHasSemaCache(packageName)) {
+            updatePackage(project->GetSourcePackagesByPkg(packageName));
+        } else {
+            uncachedPackages.push_back(packageName);
+        }
+    }
+    for (const auto &packageName : uncachedPackages) {
+        project->SetHead(context.funcDecl.fullPackageName);
+        project->IncrementTempPkgCompile(packageName);
+        updatePackage(project->GetSourcePackagesByPkg(packageName));
     }
 }
 
@@ -858,6 +915,13 @@ static ArkAST *GetCallSiteAst(const CallSiteContext &context, Cangjie::AST::Call
     return CompilerCangjieProject::GetInstance()->GetArkAST(callExpr.curFile->filePath);
 }
 
+static Cangjie::SourceManager *GetCallSiteSourceManager(
+    const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr)
+{
+    auto ast = GetCallSiteAst(context, callExpr);
+    return ast ? ast->sourceManager : nullptr;
+}
+
 static Range TransformCallSiteRangeToIDE(
     const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr, Range range)
 {
@@ -873,15 +937,17 @@ static bool IsRemovedCallArg(Ptr<Cangjie::AST::FuncArg> arg, const std::vector<P
 {
     return std::find(removedArgs.begin(), removedArgs.end(), arg) != removedArgs.end();
 }
-
-static std::string GetCallArgText(const CallSiteContext &context, Cangjie::AST::FuncArg &arg)
+// LCOV_EXCL_START
+static std::string GetCallArgText(
+    const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr, Cangjie::AST::FuncArg &arg)
 {
-    if (!context.sel.arkAst || !context.sel.arkAst->sourceManager) {
+    auto sourceManager = GetCallSiteSourceManager(context, callExpr);
+    if (!sourceManager) {
         return "";
     }
-    return context.sel.arkAst->sourceManager->GetContentBetween(arg.begin, arg.end);
+    return sourceManager->GetContentBetween(arg.begin, arg.end);
 }
-
+// LCOV_EXCL_STOP
 static std::optional<TextEdit> ReplaceRemovedCallArguments(
     const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr, const std::string &newArgument, bool hasNamedArg)
 {
@@ -932,23 +998,22 @@ static std::optional<TextEdit> ReplaceRemovedCallArguments(
         if (needSeparator) {
             replacement << ", ";
         }
-        replacement << GetCallArgText(context, *arg);
+        replacement << GetCallArgText(context, callExpr, *arg);
         needSeparator = true;
     }
     textEdit.newText = replacement.str();
     return textEdit;
-// LCOV_EXCL_BR_STOP
 }
 
 static std::optional<Position> FindMatchingRightParenFrom(
-    const Tweak::Selection &sel, const Position &leftParenPos, const Position &searchEnd)
+    Cangjie::SourceManager *sourceManager, const Position &leftParenPos, const Position &searchEnd)
 {
-    if (!sel.arkAst || !sel.arkAst->sourceManager || leftParenPos.IsZero() || searchEnd.IsZero() ||
+    if (!sourceManager || leftParenPos.IsZero() || searchEnd.IsZero() ||
         searchEnd <= leftParenPos) {
         return std::nullopt;
     }
-
-    std::string suffix = sel.arkAst->sourceManager->GetContentBetween(leftParenPos, searchEnd);
+// LCOV_EXCL_BR_STOP
+    std::string suffix = sourceManager->GetContentBetween(leftParenPos, searchEnd);
     int depth = 0;
     for (size_t offset = 0; offset < suffix.size(); ++offset) {
         if (suffix[offset] == '(') {
@@ -965,7 +1030,7 @@ static std::optional<Position> FindMatchingRightParenFrom(
     }
     return std::nullopt;
 }
-
+// LCOV_EXCL_START
 static std::string GetCallName(Cangjie::AST::CallExpr &callExpr)
 {
     if (!callExpr.baseFunc) {
@@ -981,9 +1046,10 @@ static std::string GetCallName(Cangjie::AST::CallExpr &callExpr)
 }
 
 static std::optional<Position> FindCallRightParenByName(
-    const Tweak::Selection &sel, Cangjie::AST::CallExpr &callExpr)
+    const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr)
 {
-    if (!sel.arkAst || !sel.arkAst->sourceManager || !callExpr.baseFunc || callExpr.baseFunc->end.IsZero()) {
+    auto sourceManager = GetCallSiteSourceManager(context, callExpr);
+    if (!sourceManager || !callExpr.baseFunc || callExpr.baseFunc->end.IsZero()) {
         return std::nullopt;
     }
     std::string callName = GetCallName(callExpr);
@@ -992,7 +1058,7 @@ static std::optional<Position> FindCallRightParenByName(
     }
     Position lineStart{callExpr.baseFunc->end.fileID, callExpr.baseFunc->end.line, 1};
     Position lineEnd{callExpr.baseFunc->end.fileID, callExpr.baseFunc->end.line + 1, 1};
-    std::string lineText = sel.arkAst->sourceManager->GetContentBetween(lineStart, lineEnd);
+    std::string lineText = sourceManager->GetContentBetween(lineStart, lineEnd);
     std::string needle = callName + "(";
 
     std::optional<Position> result;
@@ -1008,24 +1074,25 @@ static std::optional<Position> FindCallRightParenByName(
             continue;
         }
         Position leftParenPos = TweakUtils::PositionAtOffset(lineStart, lineText, pos + callName.size());
-        if (auto rightParen = FindMatchingRightParenFrom(sel, leftParenPos, lineEnd)) {
+        if (auto rightParen = FindMatchingRightParenFrom(sourceManager, leftParenPos, lineEnd)) {
             result = rightParen;
         }
         cursor = pos + needle.size();
     }
     return result;
 }
-
+// LCOV_EXCL_STOP
 static std::optional<Position> ResolveCallArgumentInsertPosition(
     const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr)
 {
     if (!callExpr.leftParenPos.IsZero()) {
         Position searchEnd = callExpr.end.IsZero() ? callExpr.rightParenPos : callExpr.end;
-        if (auto rightParen = FindMatchingRightParenFrom(context.sel, callExpr.leftParenPos, searchEnd)) {
+        if (auto rightParen = FindMatchingRightParenFrom(
+            GetCallSiteSourceManager(context, callExpr), callExpr.leftParenPos, searchEnd)) {
             return rightParen;
         }
     }
-    if (auto rightParen = FindCallRightParenByName(context.sel, callExpr)) {
+    if (auto rightParen = FindCallRightParenByName(context, callExpr)) {
         return rightParen;
     }
     return std::nullopt;
@@ -1185,7 +1252,7 @@ static std::string BuildCallSiteArgumentText(const CallSiteContext &context, Can
         return context.argumentText;
     }
     auto selectedExpr = GetIntroduceParameterExpr(context.sel.selectionTree, context.range);
-    if (selectedExpr && IsSupportedCompoundAssignExpr(*selectedExpr)) {
+    if (selectedExpr && TweakUtils::IsSupportedCompoundAssignExpr(*selectedExpr)) {
         return BuildCompoundAssignArgumentText(context, callExpr);
     }
 
@@ -1199,41 +1266,7 @@ static std::string BuildCallSiteArgumentText(const CallSiteContext &context, Can
     }
     return ReplaceThisReceiverAtCallSite(context, callExpr, argumentText);
 }
-
-static std::string GetCompoundAssignOperatorText(Cangjie::TokenKind tokenKind)
-{
-    switch (tokenKind) {
-        case TokenKind::EXP_ASSIGN:
-            return "**";
-        case TokenKind::MUL_ASSIGN:
-            return "*";
-        case TokenKind::DIV_ASSIGN:
-            return "/";
-        case TokenKind::ADD_ASSIGN:
-            return "+";
-        case TokenKind::SUB_ASSIGN:
-            return "-";
-        case TokenKind::MOD_ASSIGN:
-            return "%";
-        case TokenKind::LSHIFT_ASSIGN:
-            return "<<";
-        case TokenKind::RSHIFT_ASSIGN:
-            return ">>";
-        case TokenKind::AND_ASSIGN:
-            return "&&";
-        case TokenKind::BITXOR_ASSIGN:
-            return "^";
-        case TokenKind::BITAND_ASSIGN:
-            return "&";
-        case TokenKind::BITOR_ASSIGN:
-            return "|";
-        case TokenKind::OR_ASSIGN:
-            return "||";
-        default:
-            return "";
-    }
-}
-
+// LCOV_EXCL_START
 static std::string BuildCompoundAssignArgumentText(const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr)
 {
     auto selectedExpr = GetIntroduceParameterExpr(context.sel.selectionTree, context.range);
@@ -1249,13 +1282,13 @@ static std::string BuildCompoundAssignArgumentText(const CallSiteContext &contex
     std::string leftText = ApplyCallSiteArgumentReplacements(context, std::move(replacements));
     std::string rightText = context.sel.arkAst->sourceManager->GetContentBetween(
         assignExpr->rightExpr->begin, assignExpr->rightExpr->end);
-    auto opText = GetCompoundAssignOperatorText(assignExpr->op);
+    auto opText = TweakUtils::GetCompoundAssignOperatorText(assignExpr->op);
     if (leftText.empty() || rightText.empty() || opText.empty()) {
         return context.argumentText;
     }
     return ReplaceThisReceiverAtCallSite(context, callExpr, leftText + " " + opText + " " + rightText);
 }
-
+// LCOV_EXCL_STOP
 static Ptr<Cangjie::AST::FuncArg> FindCallSiteArgByParam(
     Cangjie::AST::CallExpr &callExpr, Cangjie::AST::FuncParam &param, std::size_t paramIndex)
 {
@@ -1285,7 +1318,8 @@ static std::string GetArgumentTextForParam(
     }
     auto arg = FindCallSiteArgByParam(callExpr, param, paramIndex);
     if (arg && arg->expr) {
-        return context.sel.arkAst->sourceManager->GetContentBetween(arg->expr->begin, arg->expr->end);
+        auto sourceManager = GetCallSiteSourceManager(context, callExpr);
+        return sourceManager ? sourceManager->GetContentBetween(arg->expr->begin, arg->expr->end) : "";
     }
     if (param.assignment) {
         return context.sel.arkAst->sourceManager->GetContentBetween(param.assignment->begin, param.assignment->end);
@@ -1402,16 +1436,17 @@ static std::optional<std::string> GetMemberVariableInitializer(
 static std::string ReplaceThisReceiverAtCallSite(
     const CallSiteContext &context, Cangjie::AST::CallExpr &callExpr, const std::string &argumentText)
 {
-    if (!context.sel.arkAst || !context.sel.arkAst->sourceManager) {
+    auto sourceManager = GetCallSiteSourceManager(context, callExpr);
+    if (!sourceManager) {
         return argumentText;
     }
 
     std::string receiverText;
-    
+
     if (callExpr.baseFunc && callExpr.baseFunc->astKind == ASTKind::MEMBER_ACCESS) {
         auto memberAccess = DynamicCast<Cangjie::AST::MemberAccess *>(callExpr.baseFunc.get());
         if (memberAccess && memberAccess->baseExpr) {
-            receiverText = context.sel.arkAst->sourceManager->GetContentBetween(
+            receiverText = sourceManager->GetContentBetween(
                 memberAccess->baseExpr->begin, memberAccess->baseExpr->end);
         }
     }

@@ -9,11 +9,20 @@
 #include "TweakUtils.h"
 #include <algorithm>
 #include <cctype>
+#include <sstream>
+#include <unordered_set>
 #include <cangjie/AST/Walker.h>
 // LCOV_EXCL_START
 namespace ark {
 namespace {
 constexpr size_t INDENT_RESERVE_EXTRA_LINES = 2;
+
+const std::unordered_set<Cangjie::TokenKind> COMPOUND_ASSIGN_OPERATORS = {
+    TokenKind::EXP_ASSIGN, TokenKind::MUL_ASSIGN, TokenKind::DIV_ASSIGN, TokenKind::ADD_ASSIGN,
+    TokenKind::SUB_ASSIGN, TokenKind::MOD_ASSIGN, TokenKind::LSHIFT_ASSIGN, TokenKind::RSHIFT_ASSIGN,
+    TokenKind::AND_ASSIGN, TokenKind::BITXOR_ASSIGN, TokenKind::BITAND_ASSIGN, TokenKind::BITOR_ASSIGN,
+    TokenKind::OR_ASSIGN
+};
 }
 
 bool TweakUtils::Contain(Node &node, const Range &range)
@@ -100,6 +109,181 @@ std::string TweakUtils::IndentTextBlock(const std::string &text, const std::stri
         start = end + 1;
     }
     return indented;
+}
+
+bool TweakUtils::IsSupportedCompoundAssignExpr(const Cangjie::AST::Node &node)
+{
+    auto assignExpr = DynamicCast<Cangjie::AST::AssignExpr *>(&node);
+    return assignExpr && assignExpr->isCompound && COMPOUND_ASSIGN_OPERATORS.count(assignExpr->op) > 0;
+}
+
+bool TweakUtils::IsMemberAssignInInit(Ptr<FuncDecl> func, Ptr<Node> expr)
+{
+    if (!expr || !func || !func->TestAttr(Attribute::CONSTRUCTOR)) {
+        return false;
+    }
+
+    if (auto assign = DynamicCast<AssignExpr>(expr)) {
+        if (auto leftValue = DynamicCast<MemberAccess>(assign->leftValue.get())) {
+            if (auto refExpr = DynamicCast<RefExpr>(leftValue->baseExpr.get())) {
+                return refExpr->isThis;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool TweakUtils::IsSelectionInConstInitializer(const ArkAST *arkAst, const Range &range)
+{
+    if (!arkAst || !arkAst->file) {
+        return false;
+    }
+    bool found = false;
+    ConstWalker(arkAst->file, [&range, &found](Ptr<const Node> node) {
+        if (!node || found) {
+            return VisitAction::STOP_NOW;
+        }
+        auto varDecl = DynamicCast<const VarDeclAbstract *>(node.get());
+        if (varDecl && varDecl->isConst && varDecl->initializer &&
+            varDecl->initializer->begin <= range.start && varDecl->initializer->end >= range.end) {
+            found = true;
+            return VisitAction::STOP_NOW;
+        }
+        return VisitAction::WALK_CHILDREN;
+    }).Walk();
+    return found;
+}
+
+bool TweakUtils::IsIfLetSelection(const SelectionTree &selectionTree, const Range &range)
+{
+    auto root = selectionTree.root();
+    if (!root || !root->node) {
+        return false;
+    }
+    bool found = false;
+    SelectionTree::Walk(root, [&range, &found](const SelectionTree::SelectionTreeNode *node) {
+        if (!node || !node->node || found) {
+            return SelectionTree::WalkAction::STOP_NOW;
+        }
+        auto ifExpr = DynamicCast<const IfExpr *>(node->node.get());
+        bool isIfLetExpr = ifExpr && ifExpr->sugarKind == Expr::SugarKind::IF_LET;
+        bool isLetPattern = node->node->astKind == ASTKind::LET_PATTERN_DESTRUCTOR;
+        if (node->selected == SelectionTree::Selection::Complete && (isIfLetExpr || isLetPattern) &&
+            node->node->begin == range.start && node->node->end == range.end) {
+            found = true;
+            return SelectionTree::WalkAction::STOP_NOW;
+        }
+        return SelectionTree::WalkAction::WALK_CHILDREN;
+    });
+    return found;
+}
+
+bool TweakUtils::IsTupleElementIndexSelection(
+    const ArkAST *arkAst, const SelectionTree &selectionTree, const Range &range)
+{
+    auto isSelectedTupleIndex = [&range](const SubscriptExpr &subscriptExpr) {
+        bool isTupleBase = subscriptExpr.baseExpr &&
+            subscriptExpr.baseExpr->TyKind() == TypeKind::TYPE_TUPLE;
+        if (!isTupleBase && subscriptExpr.baseExpr) {
+            auto baseRef = DynamicCast<const RefExpr *>(subscriptExpr.baseExpr.get());
+            auto target = baseRef ? baseRef->GetTarget() : nullptr;
+            isTupleBase = target && target->GetTy() && target->GetTy()->kind == TypeKind::TYPE_TUPLE;
+        }
+        if (!isTupleBase && !subscriptExpr.isTupleAccess) {
+            return false;
+        }
+        return std::any_of(subscriptExpr.indexExprs.begin(), subscriptExpr.indexExprs.end(),
+            [&range](const auto &indexExpr) {
+                return indexExpr && indexExpr->begin == range.start && indexExpr->end == range.end;
+            });
+    };
+
+    // The selection tree can be rooted at the literal, so find its parent subscript in the file AST.
+    if (arkAst && arkAst->file) {
+        bool found = false;
+        ConstWalker(arkAst->file, [&found, &isSelectedTupleIndex](Ptr<const Node> node) {
+            if (!node || found) {
+                return VisitAction::STOP_NOW;
+            }
+            auto subscriptExpr = DynamicCast<const SubscriptExpr *>(node.get());
+            if (subscriptExpr && isSelectedTupleIndex(*subscriptExpr)) {
+                found = true;
+                return VisitAction::STOP_NOW;
+            }
+            return VisitAction::WALK_CHILDREN;
+        }).Walk();
+        if (found) {
+            return true;
+        }
+    }
+
+    auto root = selectionTree.root();
+    if (!root || !root->node) {
+        return false;
+    }
+    bool found = false;
+    SelectionTree::Walk(root, [&found, &isSelectedTupleIndex](const SelectionTree::SelectionTreeNode *node) {
+        if (!node || !node->node || found) {
+            return SelectionTree::WalkAction::STOP_NOW;
+        }
+        auto subscriptExpr = DynamicCast<const SubscriptExpr *>(node->node.get());
+        found = subscriptExpr && isSelectedTupleIndex(*subscriptExpr);
+        return found ? SelectionTree::WalkAction::STOP_NOW : SelectionTree::WalkAction::WALK_CHILDREN;
+    });
+    return found;
+}
+
+std::string TweakUtils::GetTypeName(const Ty &ty)
+{
+    auto tupleTy = dynamic_cast<const TupleTy *>(&ty);
+    if (!tupleTy) {
+        return GetString(ty);
+    }
+    std::ostringstream typeName;
+    typeName << "(";
+    for (size_t i = 0; i < tupleTy->typeArgs.size(); ++i) {
+        if (i > 0) {
+            typeName << ", ";
+        }
+        typeName << GetTypeName(*tupleTy->typeArgs[i]);
+    }
+    typeName << ")";
+    return typeName.str();
+}
+
+std::string TweakUtils::GetCompoundAssignOperatorText(Cangjie::TokenKind tokenKind)
+{
+    switch (tokenKind) {
+        case TokenKind::EXP_ASSIGN:
+            return "**";
+        case TokenKind::MUL_ASSIGN:
+            return "*";
+        case TokenKind::DIV_ASSIGN:
+            return "/";
+        case TokenKind::ADD_ASSIGN:
+            return "+";
+        case TokenKind::SUB_ASSIGN:
+            return "-";
+        case TokenKind::MOD_ASSIGN:
+            return "%";
+        case TokenKind::LSHIFT_ASSIGN:
+            return "<<";
+        case TokenKind::RSHIFT_ASSIGN:
+            return ">>";
+        case TokenKind::AND_ASSIGN:
+            return "&&";
+        case TokenKind::BITXOR_ASSIGN:
+            return "^";
+        case TokenKind::BITAND_ASSIGN:
+            return "&";
+        case TokenKind::BITOR_ASSIGN:
+            return "|";
+        case TokenKind::OR_ASSIGN:
+            return "||";
+        default:
+            return "";
+    }
 }
 
 Ptr<Block> TweakUtils::FindOuterScopeNode(const ASTContext &ctx, const Expr &expr, bool &isGlobal, Range &range)
@@ -433,7 +617,7 @@ std::string TweakUtils::GetSelectedExprTypeName(const SelectionTree &selectionTr
             treeNode->node->begin == range.start && treeNode->node->end == range.end) {
             auto expr = DynamicCast<Expr *>(treeNode->node.get());
             if (expr && expr->GetTy() && GetString(*expr->GetTy()) != "UnknownType") {
-                typeName = GetString(*expr->GetTy());
+                typeName = GetTypeName(*expr->GetTy());
             }
             return SelectionTree::WalkAction::STOP_NOW;
         }

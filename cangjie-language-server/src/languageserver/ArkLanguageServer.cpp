@@ -12,6 +12,7 @@
 #include <mutex>
 #include <utility>
 #include <cctype>
+#include <algorithm>
 
 #include "cangjie/Frontend/CompilerInstance.h"
 #include "capabilities/semanticHighlight/SemanticTokensAdaptor.h"
@@ -150,41 +151,39 @@ public:
         std::stringstream log;
         Logger& logger = Logger::Instance();
         Callback<nlohmann::json> replyHandler = nullptr;
-        auto intID = id.get<int>();
-        if (intID != 0) {
-            std::lock_guard<std::mutex> mutex(callMutex);
-            // Find a corresponding callback for the request ID;
-            for (size_t index = 0; index < replyCallbacks.size(); ++index) {
-                if (replyCallbacks[index].first == intID) {
-                    replyHandler = std::move(replyCallbacks[index].second);
-                    // remove the entry
-                    (void)replyCallbacks.erase(replyCallbacks.begin() + static_cast<long long>(index));
-                    break;
-                }
+#ifndef NO_EXCEPTIONS
+        try {
+#endif
+            auto intID = id.get<int>();
+            replyHandler = TakeReplyCallback(intID);
+            if (!replyHandler) {
+                // No callback being found, use a default log callback.
+                CleanAndLog(log, "received a reply with ID:" + std::to_string(id.get<int>()) +
+                                     ", but there was no such call");
+                logger.LogMessage(MessageType::MSG_WARNING, log.str());
+                return LSPRet::SUCCESS;
             }
-        }
-
-        if (!replyHandler) {
-            // No callback being found, use a default log callback.
-            CleanAndLog(log, "received a reply with ID:" + std::to_string(id.get<int>()) +
-                                 ", but there was no such call");
-            logger.LogMessage(MessageType::MSG_WARNING, log.str());
+            // LCOV_EXCL_START
+            // Log and run the reply handler.
+            if (result.type == ValueOrErrorCheck::VALUE) {
+                CleanAndLog(log, "<-- reply:" + std::to_string(id.get<int>()) + ", success");
+                logger.LogMessage(MessageType::MSG_INFO, log.str());
+                replyHandler(std::move(result.jsonValue));
+            } else {
+                CleanAndLog(log, "<-- reply:" + std::to_string(id.get<int>()) + ", error:" +
+                    std::to_string(static_cast<int>(result.errorInfo.code)) +
+                            "," + result.errorInfo.message);
+                logger.LogMessage(MessageType::MSG_WARNING, log.str());
+            }
+            // LCOV_EXCL_STOP
             return LSPRet::SUCCESS;
-        }
-        // LCOV_EXCL_START
-        // Log and run the reply handler.
-        if (result.type == ValueOrErrorCheck::VALUE) {
-            CleanAndLog(log, "<-- reply:" + std::to_string(id.get<int>()) + ", success");
-            logger.LogMessage(MessageType::MSG_INFO, log.str());
-            replyHandler(std::move(result.jsonValue));
-        } else {
-            CleanAndLog(log, "<-- reply:" + std::to_string(id.get<int>()) + ", error:" +
-                std::to_string(static_cast<int>(result.errorInfo.code)) +
-                        "," + result.errorInfo.message);
+#ifndef NO_EXCEPTIONS
+        } catch (const std::exception &e) {
+            CleanAndLog(log, "Invalid reply: " + std::string(e.what()));
             logger.LogMessage(MessageType::MSG_WARNING, log.str());
+            return LSPRet::ABNORMAL_EXIT;
         }
-        // LCOV_EXCL_STOP
-        return LSPRet::SUCCESS;
+#endif
     }
 
     // Bind an LSP method name to a call.
@@ -249,6 +248,24 @@ public:
     void SetInitialized(bool beInitialized)
     {
         this->isInitialized = beInitialized;
+    }
+
+    Callback<nlohmann::json> TakeReplyCallback(int intID)
+    {
+        if (intID == 0) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> mutex(callMutex);
+        // Find a corresponding callback for the request ID;
+        for (size_t index = 0; index < replyCallbacks.size(); ++index) {
+            if (replyCallbacks[index].first == intID) {
+                auto handler = std::move(replyCallbacks[index].second);
+                // remove the entry
+                (void)replyCallbacks.erase(replyCallbacks.begin() + static_cast<long long>(index));
+                return handler;
+            }
+        }
+        return nullptr;
     }
 
 private:
@@ -1256,6 +1273,25 @@ void ArkLanguageServer::RemoveDiagOfCurFile(const std::string& filePath)
     (void)fixItsMap.erase(normalizeFilePath);
 }
 
+void ArkLanguageServer::RemoveUnusedDiagsOfCurFile(const std::string& filePath)
+{
+    std::lock_guard<std::mutex> lock(fixItsMutex);
+    auto it = fixItsMap.find(filePath);
+    if (it == fixItsMap.end()) {
+        return;
+    }
+    auto& diagSet = it->second;
+    for (auto setIt = diagSet.begin(); setIt != diagSet.end();) {
+        bool isUnused = std::find(setIt->tags.begin(), setIt->tags.end(), 1) != setIt->tags.end() &&
+            setIt->diagFix.has_value() && setIt->diagFix->removeUnusedSymbol;
+        if (isUnused) {
+            setIt = diagSet.erase(setIt);
+        } else {
+            ++setIt;
+        }
+    }
+}
+
 void ArkLanguageServer::UpdateDiagnostic(std::string file, DiagnosticToken diagToken)
 {
     std::lock_guard<std::mutex> lock(fixItsMutex);
@@ -1553,6 +1589,32 @@ void ArkLanguageServer::HandleAddImportQuickFix(DiagnosticToken &diagnostic, con
             }
             if (CompletionImpl::externalImportSym.count(fullSymName)) {
                 ArkLanguageServer::HandleExternalImportSym(actions, pkg, sym, textEditRange, uri);
+                return;
+            }
+            CodeAction codeAction;
+            codeAction.kind = CodeAction::QUICKFIX_ADD_IMPORT;
+            codeAction.title = "import " + pkg + "." + sym.name;
+            WorkspaceEdit edit;
+            ark::TextEdit textEdit;
+            textEdit.range = textEditRange;
+            textEdit.newText = "import " + pkg + "." + sym.name + "\n";
+            edit.changes[uri].push_back(textEdit);
+            codeAction.edit = edit;
+            actions.push_back(codeAction);
+        });
+    index->FindImportReExportSymsOnQuickFix(
+        context, importedSyms, identifier,
+        [&actions, &fixSet, &textEditRange, uri, this](const std::string &pkg, const lsp::ReExportSymbol &sym) {
+            std::string fullSymName = pkg + ":" + sym.name;
+            if (fixSet.count(fullSymName)) {
+                return;
+            } else {
+                fixSet.insert(fullSymName);
+            }
+            if (CompletionImpl::externalImportSym.count(fullSymName)) {
+                lsp::Symbol tmpSym;
+                tmpSym.name = sym.name;
+                ArkLanguageServer::HandleExternalImportSym(actions, pkg, tmpSym, textEditRange, uri);
                 return;
             }
             CodeAction codeAction;
@@ -2100,6 +2162,10 @@ static bool ShouldHandleEnumVariant(const Decl* decl, const ArkAST* arkAst)
 static bool ProcessDeclDeleteRange(const Decl* decl,
     const MacroExpandDecl* parentMacroExpandDecl, Range& deleteRange, const ArkAST* arkAst)
 {
+    if (ShouldHandleEnumVariant(decl, arkAst)) {
+        HandleEnumVariant(decl, arkAst, deleteRange);
+    }
+
     if (ShouldHandleCurMacroCall(decl)) {
         if (IsAnnotationMacro(decl)) {
             return HandleAnnotationMacro(decl, deleteRange);
@@ -2112,8 +2178,6 @@ static bool ProcessDeclDeleteRange(const Decl* decl,
         HandleOuterMacroExpand(decl, deleteRange);
     } else if (ShouldHandleParentMacroExpand(decl, parentMacroExpandDecl)) {
         HandleParentMacroExpand(decl, parentMacroExpandDecl, deleteRange);
-    } else if (ShouldHandleEnumVariant(decl, arkAst)) {
-        HandleEnumVariant(decl, arkAst, deleteRange);
     }
     return false;
 }

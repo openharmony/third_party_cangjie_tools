@@ -59,6 +59,7 @@ void DotCompleterByParse::Complete(const ArkAST &input,
                                    const Position &pos,
                                    const std::string &prefix)
 {
+    this->semaCurFileID = input.semaCache->fileID;
     CompletionEnv env;
     if (!context) {
         env.OutputResult(result);
@@ -199,6 +200,9 @@ void DotCompleterByParse::CompleteByExpandDecl(const ArkAST &input, const Positi
 
     // Compile the file that use before file content of enter "."
     auto ci = CompilerCangjieProject::GetInstance()->GetCIForDotComplete(filePath, pos, content);
+    if (!ci || ci->GetSourcePackages().empty() || !ci->GetSourcePackages()[0]) {
+        return;
+    }
     OwnedPtr<Decl> targetDecl{};
     for (auto &file : ci->GetSourcePackages()[0]->files) {
         if (file->filePath != filePath) {
@@ -439,7 +443,7 @@ Ptr<Decl> DotCompleterByParse::FindTopDecl(const ArkAST &input, const std::strin
                                            CompletionEnv &env, const Position &pos)
 {
     Ptr<Decl> topDecl = nullptr;
-    std::string query = "_ = (" + std::to_string(pos.fileID) + ", " + std::to_string(pos.line) +
+    std::string query = "_ = (" + std::to_string(semaCurFileID) + ", " + std::to_string(pos.line) +
                         ", " + std::to_string(pos.column - 1) + ")";
     auto posSyms = SearchContext(context, query);
     if (posSyms.empty()) {
@@ -586,7 +590,7 @@ void DotCompleterByParse::FindBlock(Ptr<Node> node, const Position &pos, std::st
 void DotCompleterByParse::FindVarDecl(Ptr<Node> node, const Position &pos, std::string &scopeName, bool &isInclude)
 {
     auto pVarDecl = dynamic_cast<VarDecl*>(node.get());
-    if (!pVarDecl) { return; }
+    if (!pVarDecl || !pVarDecl->initializer) { return; }
     // initializer may be lambdaExpr, matchCase
     std::set<ASTKind> keyKind = {
         ASTKind::LAMBDA_EXPR,
@@ -784,10 +788,11 @@ void DotCompleterByParse::FindMatchExpr(Ptr<Node> node, const Position &pos, std
 
 void DotCompleterByParse::FindVarPattern(Ptr<Node> node, const Position &pos, std::string &scopeName, bool &isInclude)
 {
+    (void)pos;
     auto pVarPattern = dynamic_cast<VarPattern*>(node.get());
     if (!pVarPattern) { return; }
     if (pVarPattern->varDecl) {
-        std::string query = "_ = (" + std::to_string(pos.fileID) + ", " +
+        std::string query = "_ = (" + std::to_string(semaCurFileID) + ", " +
                             std::to_string(pVarPattern->varDecl->begin.line) + ", " +
                             std::to_string(pVarPattern->varDecl->begin.column) + ")";
         auto posSyms = SearchContext(context, query);
@@ -926,6 +931,15 @@ void DotCompleterByParse::FindTryExpr(Ptr<Node> node, const Position &pos, std::
 {
     auto pTryExpr = dynamic_cast<TryExpr*>(node.get());
     if (!pTryExpr) { return; }
+
+    for (const auto &resource : pTryExpr->resourceSpec) {
+        if (resource && resource->begin <= pos && pos <= resource->end) {
+            scopeName = QueryByPos(resource.get(), pos);
+            DeepFind(resource.get(), pos, scopeName, isInclude);
+            return;
+        }
+    }
+
     if (pTryExpr->tryBlock && Contain(pTryExpr->tryBlock.get(), pos)) {
         DeepFind(pTryExpr->tryBlock.get(), pos, scopeName, isInclude);
     }
@@ -1476,7 +1490,8 @@ void DotCompleterByParse::CompleteBuiltInType(Ty *type, CompletionEnv &env) cons
 std::string DotCompleterByParse::QueryByPos(Ptr<Node> node, const Position pos)
 {
     if (!node) { return ""; }
-    std::string query = "_ = (" + std::to_string(pos.fileID) + ", "+
+    (void)pos;
+    std::string query = "_ = (" + std::to_string(semaCurFileID) + ", "+
                         std::to_string(node->begin.line) + ", " +
                         std::to_string(node->begin.column) + ")";
     auto posSyms = SearchContext(context, query);
